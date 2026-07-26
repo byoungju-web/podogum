@@ -123,6 +123,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
 
     <div class="board" id="board"></div>
     <div class="summary" id="summary"></div>
+    <div class="quota" id="quota"></div>
 
     <div class="viewtabs" id="viewtabs">
       <button type="button" data-view="fused" aria-pressed="true">융합 순위</button>
@@ -133,9 +134,26 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       <p class="hint">검색 서버 주소는 보통 비워두면 됩니다. podogum.kr에서 열면 같은 도메인의 API를 알아서 씁니다.</p>
       <label for="api">API BASE</label>
       <input id="api" type="text" placeholder="비워두면 이 페이지와 같은 도메인">
+      <label for="pass">이용권 코드</label>
+      <input id="pass" type="text" autocomplete="off" placeholder="선택 · 예: PODO-1234">
+      <p class="hint">발급받은 코드를 넣으면 남은 횟수만큼 웹 검색이 열립니다.</p>
+
       <label for="bkey">BRAVE API KEY <span id="bkeyState"></span></label>
       <input id="bkey" type="password" autocomplete="off" placeholder="BSA... 로 시작하는 키">
-      <p class="hint">웹 검색에 씁니다. api-dashboard.search.brave.com 에서 발급합니다.</p>
+      <p class="hint">자기 키를 넣으면 웹 검색이 <b>무제한</b>이 됩니다. 요금은 본인 계정으로 나가고, 매달 $5 무료 크레딧(약 1,000회)이 들어옵니다. 대부분은 이 안에서 끝납니다.</p>
+
+      <details class="guide">
+        <summary>Brave 키 받는 방법 · 5분</summary>
+        <ol>
+          <li><a href="https://api-dashboard.search.brave.com/register" target="_blank" rel="noopener">api-dashboard.search.brave.com/register</a> 에서 가입합니다.</li>
+          <li>메일 인증을 마칩니다.</li>
+          <li>왼쪽 <b>Subscriptions › Available plans</b> 에서 <b>Search</b> 플랜을 고릅니다. $5 / 1,000회이고 매달 $5 크레딧이 자동으로 들어옵니다.</li>
+          <li>카드를 등록합니다. 크레딧 안에서만 쓰면 청구되지 않습니다.</li>
+          <li>중요 · <b>Subscriptions › Usage limits</b> 에서 <b>Free credits only</b> 로 잠그세요. 이렇게 하면 무료 크레딧을 넘겨 쓰는 일이 아예 없어서 요금이 나올 수 없습니다.</li>
+          <li><b>Dashboard › API keys</b> 에서 <b>Add API key</b> 를 눌러 키를 만듭니다.</li>
+          <li>그 키(BSA... 로 시작)를 위 칸에 붙여넣고 저장합니다.</li>
+        </ol>
+      </details>
 
       <label for="skey">STACK OVERFLOW KEY</label>
       <input id="skey" type="password" autocomplete="off" placeholder="선택 · stackapps.com 에서 무료 발급">
@@ -179,6 +197,17 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var LS_SKEY = 'podogum_stackex';
   var LS_MAIL = 'podogum_mail';
   var LS_SXNG = 'podogum_searxng';
+  var LS_PASS = 'podogum_pass';
+  var LS_VID  = 'podogum_vid';
+
+  function visitorId() {
+    var v = readLS(LS_VID, '');
+    if (!v) {
+      v = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      writeLS(LS_VID, v);
+    }
+    return v;
+  }
 
   // 원격 소스 (worker.js의 SOURCES와 id가 같아야 합니다)
   var REMOTE = [
@@ -213,7 +242,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   function $(id) { return document.getElementById(id); }
   function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
 
-  var out = $('out'), board = $('board'), summary = $('summary');
+  var out = $('out'), board = $('board'), summary = $('summary'), quotaBox = $('quota');
   var input = $('q'), goBtn = $('go');
 
   /* ================= 저장된 설정 ================= */
@@ -249,6 +278,8 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     var s2 = (readLS(LS_SKEY, '') || '').trim(); if (s2) h['X-Stackex-Key'] = s2;
     var m = (readLS(LS_MAIL, '') || '').trim();  if (m) h['X-Openalex-Mail'] = m;
     var x = (readLS(LS_SXNG, '') || '').trim();  if (x) h['X-Searxng-Url'] = x;
+    var p2 = (readLS(LS_PASS, '') || '').trim(); if (p2) h['X-Pass-Key'] = p2;
+    h['X-Visitor-Id'] = visitorId();
     return h;
   }
 
@@ -471,6 +502,50 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     summary.appendChild(el('span', null, '건 · ' + (Date.now() - t0) + 'ms'));
   }
 
+  function paintQuota(q) {
+    clear(quotaBox);
+    quotaBox.className = 'quota';
+    if (!q) return;
+
+    if (q.mode === 'byok') {
+      quotaBox.appendChild(el('span', null, '내 Brave 키로 검색 중 · 무제한'));
+      return;
+    }
+    if (q.mode === 'pass') {
+      quotaBox.appendChild(el('span', null, '이용권 잔여 '));
+      quotaBox.appendChild(el('b', null, String(q.left)));
+      quotaBox.appendChild(el('span', null, '회'));
+      return;
+    }
+    if (q.mode === 'free') {
+      quotaBox.appendChild(el('span', null, '오늘 무료 웹검색 '));
+      quotaBox.appendChild(el('b', null, String(q.left)));
+      quotaBox.appendChild(el('span', null, '회 남음 (하루 ' + q.limit + '회)'));
+      return;
+    }
+
+    // 막힌 경우
+    quotaBox.className = 'quota out';
+    var msg = {
+      freefull:   '오늘 무료 웹검색을 다 쓰셨습니다.',
+      passempty:  '이용권을 다 쓰셨습니다.',
+      badpass:    '이용권 코드가 확인되지 않습니다.',
+      globalfull: '오늘 전체 무료분이 찼습니다.',
+      nokv:       '무료 웹검색이 준비되지 않았습니다.',
+      none:       '웹검색을 쓸 수 없습니다.'
+    }[q.mode] || '웹검색이 잠겨 있습니다.';
+    quotaBox.appendChild(el('span', null, msg + ' 나머지 소스는 계속 검색됩니다. '));
+    var a = el('a', null, '설정에서 Brave 키를 넣으면 무제한');
+    a.href = '#';
+    a.style.color = '#6b46c1';
+    a.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      var pn = document.getElementById('panel');
+      if (pn) pn.classList.add('open');
+    });
+    quotaBox.appendChild(a);
+  }
+
   /* ================= 서버 연결 확인 ================= */
   function friendly(err) {
     var m = String((err && err.message) || err);
@@ -556,6 +631,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
           return body;
         });
       }).then(function (body) {
+        if (body.quota) paintQuota(body.quota);
         var stat = (body.stats || [])[0] || {};
         var items = body.results || [];
         if (stat.ok === false) {
@@ -585,13 +661,14 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   function initPanel() {
     var panel = $('panel'), apiInput = $('api'), toggles = $('toggles');
     var keyInput = $('bkey'), keyState = $('bkeyState');
-    var sInput = $('skey'), mInput = $('mail'), xInput = $('sxng');
+    var sInput = $('skey'), mInput = $('mail'), xInput = $('sxng'), pInput = $('pass');
     apiInput.value = readLS(LS_API, '');
     apiInput.placeholder = '비워두면 이 페이지와 같은 도메인';
     keyInput.value = braveKey();
     sInput.value = readLS(LS_SKEY, '');
     mInput.value = readLS(LS_MAIL, '');
     xInput.value = readLS(LS_SXNG, '');
+    pInput.value = readLS(LS_PASS, '');
 
     function paintKeyState() {
       var k = braveKey();
@@ -626,6 +703,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       put(LS_SKEY, sInput.value.trim());
       put(LS_MAIL, mInput.value.trim());
       put(LS_SXNG, xInput.value.trim().replace(/\/+$/, ''));
+      put(LS_PASS, pInput.value.trim());
       paintKeyState();
       var off = [];
       Array.prototype.forEach.call(toggles.querySelectorAll('input'), function (cb) {
