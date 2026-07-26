@@ -2,5 +2,8 @@ name = "podogum"
 main = "workers.js"
 compatibility_date = "2026-01-01"
 
+[assets]
+directory = "./public/"
+
 [placement]
 mode = "smart"
