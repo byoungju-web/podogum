@@ -34,7 +34,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -127,9 +127,10 @@ async function fromBrave(q, env, opts) {
   });
 }
 
-async function fromSearxng(q, env) {
-  if (!env.SEARXNG_URL) throw new Error('인스턴스 주소 없음');
-  const base = String(env.SEARXNG_URL).replace(/\/+$/, '');
+async function fromSearxng(q, env, opts) {
+  const raw = (opts && opts.searxngUrl) || env.SEARXNG_URL;
+  if (!raw) throw new Error('인스턴스 주소 없음');
+  const base = String(raw).replace(/\/+$/, '');
   const u = new URL(base + '/search');
   u.searchParams.set('q', q);
   u.searchParams.set('format', 'json');
@@ -222,14 +223,15 @@ function shapeSo(data) {
   });
 }
 
-async function fromStackOverflow(q, env) {
+async function fromStackOverflow(q, env, opts) {
   const u = new URL('https://api.stackexchange.com/2.3/search/advanced');
   u.searchParams.set('q', q);
   u.searchParams.set('site', 'stackoverflow');
   u.searchParams.set('pagesize', '6');
   // 키가 없으면 Cloudflare 공용 IP의 하루 할당량을 남들과 나눠 쓰게 되어 거의 항상 막힙니다.
   // stackapps.com 에서 무료로 받은 키를 STACKEX_KEY에 넣으면 앱 기준으로 바뀝니다.
-  if (env && env.STACKEX_KEY) u.searchParams.set('key', env.STACKEX_KEY);
+  const sk = (opts && opts.stackexKey) || (env && env.STACKEX_KEY);
+  if (sk) u.searchParams.set('key', sk);
   return shapeSo(await grab(u.toString(), { retries: 0 }));
 }
 
@@ -258,12 +260,13 @@ async function fromArxiv(q) {
   return out;
 }
 
-async function fromOpenAlex(q, env) {
+async function fromOpenAlex(q, env, opts) {
   const u = new URL('https://api.openalex.org/works');
   u.searchParams.set('search', q);
   u.searchParams.set('per-page', '6');
   // 실제로 받는 메일 주소를 OPENALEX_MAIL에 넣으면 여유 있는 대역으로 처리됩니다
-  if (env && env.OPENALEX_MAIL) u.searchParams.set('mailto', env.OPENALEX_MAIL);
+  const mail = (opts && opts.openalexMail) || (env && env.OPENALEX_MAIL);
+  if (mail) u.searchParams.set('mailto', mail);
   const data = await grab(u.toString());
   return (data.results || []).map(function (x) {
     return {
@@ -306,8 +309,100 @@ async function fromNpm(q) {
   }).filter(function (x) { return x.title; });
 }
 
+/* -------- 날씨 (Open-Meteo, 키 없음) --------
+   검색어에 날씨 낱말과 지명이 같이 있을 때만 켜집니다.
+   "부산에 비가 오냐" 같은 질문에 문서가 아니라 실제 예보로 답하기 위한 소스입니다. */
+
+const WEATHER_HINT = /(날씨|기온|온도|비가|비 오|눈이|눈 오|우산|더운|더위|추운|추위|습도|바람|예보|weather|forecast|rain|snow|temperature)/i;
+const JOSA = /(에서|으로|에게|이랑|하고|한테|까지|부터|에|은|는|이|가|을|를|의|로|도|만|과|와)$/;
+const STOPWORD = /^(오늘|내일|모레|지금|현재|이번|주말|아침|저녁|밤|낮|날씨|기온|온도|우산|예보|어떻게|어때|어떄|알려줘|알려|아니면|안오냐|오냐|weather|today|tomorrow|now)$/i;
+
+const WMO = {
+  0: '맑음', 1: '대체로 맑음', 2: '구름 조금', 3: '흐림',
+  45: '안개', 48: '서리 안개',
+  51: '약한 이슬비', 53: '이슬비', 55: '강한 이슬비',
+  61: '약한 비', 63: '비', 65: '강한 비',
+  66: '얼어붙는 비', 67: '강하게 얼어붙는 비',
+  71: '약한 눈', 73: '눈', 75: '많은 눈', 77: '싸락눈',
+  80: '소나기', 81: '강한 소나기', 82: '매우 강한 소나기',
+  85: '눈 소나기', 86: '강한 눈 소나기',
+  95: '뇌우', 96: '우박 동반 뇌우', 99: '강한 우박 뇌우'
+};
+
+function placeCandidates(q) {
+  return q.split(/\s+/)
+    .map(function (t) { return t.replace(/[?!.,~]/g, '').replace(JOSA, ''); })
+    .filter(function (t) { return t.length >= 2 && !STOPWORD.test(t) && !/^\d+$/.test(t); })
+    .slice(0, 4);
+}
+
+async function geocode(name) {
+  const u = new URL('https://geocoding-api.open-meteo.com/v1/search');
+  u.searchParams.set('name', name);
+  u.searchParams.set('count', '1');
+  u.searchParams.set('language', 'ko');
+  u.searchParams.set('format', 'json');
+  const data = await grab(u.toString(), { retries: 0 });
+  const hit = (data.results || [])[0];
+  return hit ? { name: hit.name, lat: hit.latitude, lon: hit.longitude, country: hit.country || '' } : null;
+}
+
+async function fromWeather(q) {
+  if (!WEATHER_HINT.test(q)) throw new Error('날씨 질문 아님');
+
+  let place = null;
+  const names = placeCandidates(q);
+  for (let i = 0; i < names.length && !place; i++) {
+    try { place = await geocode(names[i]); } catch (e) { /* 다음 후보 */ }
+  }
+  if (!place) throw new Error('지명을 못 찾음');
+
+  const u = new URL('https://api.open-meteo.com/v1/forecast');
+  u.searchParams.set('latitude', String(place.lat));
+  u.searchParams.set('longitude', String(place.lon));
+  u.searchParams.set('current', 'temperature_2m,relative_humidity_2m,precipitation,weather_code');
+  u.searchParams.set('daily', 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max');
+  u.searchParams.set('timezone', 'auto');
+  u.searchParams.set('forecast_days', '3');
+  const d = await grab(u.toString(), { retries: 0 });
+
+  const cur = d.current || {};
+  const day = d.daily || {};
+  const sky = WMO[cur.weather_code] || '';
+  const pop = (day.precipitation_probability_max || [])[0];
+  const hi = (day.temperature_2m_max || [])[0];
+  const lo = (day.temperature_2m_min || [])[0];
+
+  const head = place.name + ' 지금 ' + Math.round(cur.temperature_2m) + '°C'
+             + (sky ? ' · ' + sky : '')
+             + (typeof pop === 'number' ? ' · 강수확률 ' + pop + '%' : '');
+
+  const lines = [];
+  if (typeof hi === 'number') lines.push('오늘 ' + Math.round(lo) + '~' + Math.round(hi) + '°C');
+  if (typeof cur.precipitation === 'number' && cur.precipitation > 0) lines.push('현재 강수 ' + cur.precipitation + 'mm');
+  if (typeof cur.relative_humidity_2m === 'number') lines.push('습도 ' + cur.relative_humidity_2m + '%');
+
+  // 내일·모레 요약
+  const codes = day.weather_code || [];
+  const pops = day.precipitation_probability_max || [];
+  const labels = ['오늘', '내일', '모레'];
+  const ahead = [];
+  for (let i = 1; i < Math.min(3, codes.length); i++) {
+    ahead.push(labels[i] + ' ' + (WMO[codes[i]] || '') + (typeof pops[i] === 'number' ? ' ' + pops[i] + '%' : ''));
+  }
+  if (ahead.length) lines.push(ahead.join(' · '));
+
+  return [{
+    title: head,
+    url: 'https://search.naver.com/search.naver?query=' + encodeURIComponent(place.name + ' 날씨'),
+    snippet: lines.join(' · '),
+    extra: '실시간 예보 · Open-Meteo'
+  }];
+}
+
 // id, 표시명, RRF 가중치, 어댑터
 const SOURCES = [
+  { id: 'weather',  label: '날씨',           weight: 2.0, fn: fromWeather },
   { id: 'brave',    label: 'Brave',          weight: 1.4, fn: fromBrave },
   { id: 'searxng',  label: 'SearXNG',        weight: 1.4, fn: fromSearxng },
   { id: 'ddg',      label: 'DuckDuckGo',     weight: 0.9, fn: fromDuckDuckGo },
@@ -351,8 +446,8 @@ function fuse(perSource) {
 
   perSource.forEach(function (entry) {
     entry.items.forEach(function (item, rank) {
-      if (!item.url || !item.title) return;
-      const key = normalizeUrl(item.url);
+      if (!item.title) return;
+      const key = item.url ? normalizeUrl(item.url) : ('t:' + item.title);
       const gain = entry.weight / (RRF_K + rank);
 
       let doc = docs.get(key);
@@ -404,7 +499,13 @@ async function handleSearch(request, env, ctx, origin) {
   if (q.length > 200) return json({ error: '검색어가 너무 깁니다.' }, 400, origin);
 
   // 브라우저가 보낸 개인 키 (저장하지 않고 이 요청에만 씁니다)
-  const opts = { braveKey: (request.headers.get('X-Brave-Key') || '').trim() };
+  // 브라우저가 보낸 개인 키·설정 (저장하지 않고 이 요청에만 씁니다)
+  const opts = {
+    braveKey:     (request.headers.get('X-Brave-Key') || '').trim(),
+    stackexKey:   (request.headers.get('X-Stackex-Key') || '').trim(),
+    openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
+    searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim()
+  };
 
   const only = (src.searchParams.get('only') || '').split(',').filter(Boolean);
   const active = only.length
@@ -416,6 +517,7 @@ async function handleSearch(request, env, ctx, origin) {
   cacheUrl.searchParams.set('q', q);
   cacheUrl.searchParams.set('s', active.map(function (s) { return s.id; }).join(','));
   cacheUrl.searchParams.set('bk', (opts.braveKey || env.BRAVE_API_KEY) ? '1' : '0');
+  cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
   const hit = await cache.match(cacheKey);
