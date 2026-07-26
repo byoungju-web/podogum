@@ -87,15 +87,19 @@ async function grab(url, options) {
     try {
       const body = await res.text();
       const m = /"error_message"\s*:\s*"([^"]{0,120})"/.exec(body)
+             || /"error"\s*:\s*"([^"]{0,120})"/.exec(body)
              || /"message"\s*:\s*"([^"]{0,120})"/.exec(body);
-      why = m ? m[1] : body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
+      why = m ? m[1] : body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      why = why.slice(0, 60);
     } catch (e) { why = ''; }
 
     lastErr = new Error('HTTP ' + res.status + (why ? ' · ' + why : ''));
 
-    const retryable = res.status === 429 || res.status >= 500;
+    // 429는 재시도하지 않습니다. 할당량 창은 분·시간 단위라 기다려도 안 풀리고
+    // 재시도가 응답만 느리게 만듭니다. 일시적 서버 오류만 다시 시도합니다.
+    const retryable = res.status >= 500;
     if (!retryable || attempt === tries) throw lastErr;
-    await sleep(700 * (attempt + 1));
+    await sleep(600 * (attempt + 1));
   }
   throw lastErr;
 }
@@ -218,26 +222,15 @@ function shapeSo(data) {
   });
 }
 
-async function fromStackOverflow(q) {
-  const adv = new URL('https://api.stackexchange.com/2.3/search/advanced');
-  adv.searchParams.set('q', q);
-  adv.searchParams.set('site', 'stackoverflow');
-  adv.searchParams.set('pagesize', '6');
-
-  try {
-    return shapeSo(await grab(adv.toString()));
-  } catch (e) {
-    // advanced가 거부하면 제목 검색으로 한 번 더 (요구 파라미터가 더 적습니다)
-    const basic = new URL('https://api.stackexchange.com/2.3/search');
-    basic.searchParams.set('intitle', q);
-    basic.searchParams.set('site', 'stackoverflow');
-    basic.searchParams.set('pagesize', '6');
-    try {
-      return shapeSo(await grab(basic.toString(), { retries: 0 }));
-    } catch (e2) {
-      throw e;   // 첫 번째 에러가 원인 파악에 더 쓸모 있습니다
-    }
-  }
+async function fromStackOverflow(q, env) {
+  const u = new URL('https://api.stackexchange.com/2.3/search/advanced');
+  u.searchParams.set('q', q);
+  u.searchParams.set('site', 'stackoverflow');
+  u.searchParams.set('pagesize', '6');
+  // 키가 없으면 Cloudflare 공용 IP의 하루 할당량을 남들과 나눠 쓰게 되어 거의 항상 막힙니다.
+  // stackapps.com 에서 무료로 받은 키를 STACKEX_KEY에 넣으면 앱 기준으로 바뀝니다.
+  if (env && env.STACKEX_KEY) u.searchParams.set('key', env.STACKEX_KEY);
+  return shapeSo(await grab(u.toString(), { retries: 0 }));
 }
 
 async function fromArxiv(q) {
