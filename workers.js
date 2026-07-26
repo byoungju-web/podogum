@@ -23,7 +23,10 @@ const ALLOWED_ORIGINS = [
 const CACHE_TTL = 1800;        // 30분
 const SOURCE_TIMEOUT = 6000;   // 소스별 6초
 const UA = 'podogum/2.0 (+https://podolang.kr)';
-const RRF_K = 60;              // 표준값
+const RRF_K = 60;
+
+const FREE_PER_DAY_DEFAULT   = 3;    // 방문자 1인당 하루 무료 Brave 검색
+const GLOBAL_PER_DAY_DEFAULT = 300;  // 전체 하루 상한 (크레딧 보호용 안전판)              // 표준값
 
 /* =======================================================
    공통
@@ -104,15 +107,155 @@ async function grab(url, options) {
   throw lastErr;
 }
 
+
+/* =======================================================
+   Brave 할당량
+
+   Brave만 돈이 드는 소스입니다. 나머지 11개는 무료라 아무 제한이 없습니다.
+   그래서 이 문을 통과하지 못하면 Brave 칸만 닫히고 검색은 계속됩니다.
+
+   세 가지 통로가 있습니다.
+     byok  자기 Brave 키를 넣은 사람      무제한, 사장님 비용 0
+     pass  이용권 코드를 넣은 사람        남은 횟수만큼
+     free  아무것도 안 넣은 사람          하루 몇 회
+
+   KV(PODOGUM_KV)가 연결되어 있지 않으면 free와 pass는 열리지 않습니다.
+   횟수를 셀 곳이 없는데 서버 키를 열어주면 크레딧이 그냥 새기 때문입니다.
+   ======================================================= */
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function sha8(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).slice(0, 4)
+    .map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+
+async function bump(kv, key, ttl) {
+  const cur = parseInt((await kv.get(key)) || '0', 10) || 0;
+  await kv.put(key, String(cur + 1), { expirationTtl: ttl });
+  return cur + 1;
+}
+
+async function checkQuota(env, request, opts, consume) {
+  // 1. 자기 키를 가져온 사람은 셀 필요가 없습니다. 본인 계정에서 나갑니다.
+  if (opts.braveKey) {
+    return { ok: true, mode: 'byok', key: opts.braveKey, left: null, limit: null };
+  }
+
+  if (!env.BRAVE_API_KEY) {
+    return { ok: false, mode: 'none', reason: '서버에 Brave 키가 없습니다', left: 0, limit: 0 };
+  }
+
+  const kv = env.PODOGUM_KV;
+  if (!kv) {
+    return { ok: false, mode: 'nokv', reason: 'Brave 키를 입력하면 검색됩니다', left: 0, limit: 0 };
+  }
+
+  const day = today();
+
+  // 2. 전체 안전판. 이걸 넘으면 아무도 서버 키를 못 씁니다.
+  const globalCap = parseInt(env.GLOBAL_PER_DAY || GLOBAL_PER_DAY_DEFAULT, 10);
+  const globalUsed = parseInt((await kv.get('g:' + day)) || '0', 10) || 0;
+  if (globalUsed >= globalCap) {
+    return { ok: false, mode: 'globalfull', reason: '오늘 전체 무료분이 다 찼습니다', left: 0, limit: 0 };
+  }
+
+  // 3. 이용권 코드
+  if (opts.passKey) {
+    const raw = await kv.get('pass:' + opts.passKey);
+    if (!raw) return { ok: false, mode: 'badpass', reason: '없는 이용권 코드입니다', left: 0, limit: 0 };
+    let pass;
+    try { pass = JSON.parse(raw); } catch (e) { pass = null; }
+    if (!pass) return { ok: false, mode: 'badpass', reason: '이용권 정보가 깨졌습니다', left: 0, limit: 0 };
+    if ((pass.left || 0) <= 0) {
+      return { ok: false, mode: 'passempty', reason: '이용권을 다 쓰셨습니다', left: 0, limit: pass.total || 0 };
+    }
+    if (consume) {
+      pass.left = pass.left - 1;
+      pass.used_at = day;
+      await kv.put('pass:' + opts.passKey, JSON.stringify(pass));
+      await bump(kv, 'g:' + day, 172800);
+    }
+    return { ok: true, mode: 'pass', key: env.BRAVE_API_KEY,
+             left: pass.left - (consume ? 0 : 1) + (consume ? 0 : 1), limit: pass.total || null };
+  }
+
+  // 4. 무료. 브라우저 ID와 IP를 각각 세고 많이 쓴 쪽을 기준으로 봅니다.
+  //    ID는 지우면 초기화되고 IP는 여러 사람이 공유하니, 둘을 겹쳐서 새는 걸 줄입니다.
+  const cap = parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10);
+  const vid = (opts.visitorId || '').slice(0, 40) || 'anon';
+  const ipHash = await sha8((request.headers.get('CF-Connecting-IP') || '0') + '|' + day);
+
+  const kId = 'f:' + day + ':v:' + vid;
+  const kIp = 'f:' + day + ':i:' + ipHash;
+  const usedId = parseInt((await kv.get(kId)) || '0', 10) || 0;
+  const usedIp = parseInt((await kv.get(kIp)) || '0', 10) || 0;
+  const used = Math.max(usedId, usedIp);
+
+  if (used >= cap) {
+    return { ok: false, mode: 'freefull', reason: '오늘 무료 ' + cap + '회를 다 쓰셨습니다', left: 0, limit: cap };
+  }
+
+  if (consume) {
+    await bump(kv, kId, 172800);
+    await bump(kv, kIp, 172800);
+    await bump(kv, 'g:' + day, 172800);
+  }
+
+  return { ok: true, mode: 'free', key: env.BRAVE_API_KEY,
+           left: cap - used - (consume ? 1 : 0), limit: cap };
+}
+
+/* 이용권 발급·조회. 사장님만 씁니다.
+   폰 브라우저 주소창에 그대로 치면 됩니다.
+
+     .../api/pass?admin=관리비밀번호&code=PODO-1234&add=1000&memo=홍길동
+     .../api/pass?admin=관리비밀번호&code=PODO-1234                (잔액 확인)
+*/
+async function handlePass(request, env, origin) {
+  const url = new URL(request.url);
+  const admin = url.searchParams.get('admin') || '';
+  if (!env.ADMIN_KEY || admin !== env.ADMIN_KEY) {
+    return json({ error: '권한 없음' }, 403, origin);
+  }
+  const kv = env.PODOGUM_KV;
+  if (!kv) return json({ error: 'KV가 연결되지 않았습니다' }, 500, origin);
+
+  const code = (url.searchParams.get('code') || '').trim();
+  if (!code) return json({ error: 'code 가 필요합니다' }, 400, origin);
+
+  const add = parseInt(url.searchParams.get('add') || '0', 10) || 0;
+  const raw = await kv.get('pass:' + code);
+  let pass = null;
+  try { pass = raw ? JSON.parse(raw) : null; } catch (e) { pass = null; }
+
+  if (!add) {
+    if (!pass) return json({ error: '없는 코드입니다', code: code }, 404, origin);
+    return json({ code: code, left: pass.left, total: pass.total, memo: pass.memo || '' }, 200, origin);
+  }
+
+  if (!pass) pass = { left: 0, total: 0, memo: '', created: today() };
+  pass.left  = (pass.left || 0) + add;
+  pass.total = (pass.total || 0) + add;
+  const memo = url.searchParams.get('memo');
+  if (memo) pass.memo = memo.slice(0, 60);
+  await kv.put('pass:' + code, JSON.stringify(pass));
+
+  return json({ ok: true, code: code, added: add, left: pass.left, total: pass.total, memo: pass.memo }, 200, origin);
+}
+
 /* =======================================================
    소스별 어댑터
    각 어댑터는 [{title, url, snippet, extra}] 를 반환합니다
    ======================================================= */
 
 async function fromBrave(q, env, opts) {
-  // 우선순위: 브라우저에서 보낸 키 > Worker Secret
-  const key = (opts && opts.braveKey) || env.BRAVE_API_KEY;
-  if (!key) throw new Error('Brave 키 없음');
+  // 할당량 문을 통과할 때 정해진 키만 씁니다 (checkQuota가 넣어줍니다)
+  const key = opts && opts.allowedBraveKey;
+  if (!key) throw new Error((opts && opts.braveReason) || 'Brave 키 없음');
   const u = new URL('https://api.search.brave.com/res/v1/web/search');
   u.searchParams.set('q', q);
   u.searchParams.set('count', '10');
@@ -547,7 +690,9 @@ async function handleSearch(request, env, ctx, origin) {
     braveKey:     (request.headers.get('X-Brave-Key') || '').trim(),
     stackexKey:   (request.headers.get('X-Stackex-Key') || '').trim(),
     openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
-    searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim()
+    searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
+    passKey:      (request.headers.get('X-Pass-Key') || '').trim(),
+    visitorId:    (request.headers.get('X-Visitor-Id') || '').trim()
   };
 
   const only = (src.searchParams.get('only') || '').split(',').filter(Boolean);
@@ -556,10 +701,22 @@ async function handleSearch(request, env, ctx, origin) {
     : SOURCES;
   if (!active.length) return json({ error: '고른 소스가 없습니다.' }, 400, origin);
 
+  // Brave가 이번 요청에 실제로 포함될 때만 할당량을 봅니다.
+  // 화면이 소스별로 따로 요청하기 때문에, 이 조건이 없으면
+  // GitHub만 검색해도 Brave 횟수가 깎입니다.
+  const wantsBrave = active.some(function (s) { return s.id === 'brave'; });
+  let gate = { ok: false, mode: 'skip', left: null, limit: null };
+  if (wantsBrave) {
+    // 아직 세지는 않습니다. 캐시에서 답이 나오면 깎지 않기 위해서입니다.
+    gate = await checkQuota(env, request, opts, false);
+    opts.allowedBraveKey = gate.ok ? gate.key : '';
+    opts.braveReason = gate.ok ? '' : (gate.reason || '무료분을 다 쓰셨습니다');
+  }
+
   const cacheUrl = new URL(src.origin + '/cache/fusion');
   cacheUrl.searchParams.set('q', q);
   cacheUrl.searchParams.set('s', active.map(function (s) { return s.id; }).join(','));
-  cacheUrl.searchParams.set('bk', (opts.braveKey || env.BRAVE_API_KEY) ? '1' : '0');
+  cacheUrl.searchParams.set('bk', opts.allowedBraveKey ? '1' : '0');
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
@@ -567,7 +724,15 @@ async function handleSearch(request, env, ctx, origin) {
   if (hit) {
     const body = await hit.json();
     body.cache = 'HIT';
+    if (wantsBrave) body.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
     return json(body, 200, origin);
+  }
+
+  // 캐시에 없으니 실제로 Brave를 부릅니다. 이제 한 번 차감합니다.
+  if (wantsBrave && gate.ok && gate.mode !== 'byok') {
+    gate = await checkQuota(env, request, opts, true);
+    opts.allowedBraveKey = gate.ok ? gate.key : '';
+    opts.braveReason = gate.ok ? '' : (gate.reason || '무료분을 다 쓰셨습니다');
   }
 
   const started = Date.now();
@@ -617,6 +782,8 @@ async function handleSearch(request, env, ctx, origin) {
   });
   ctx.waitUntil(cache.put(cacheKey, toCache));
 
+  // 사람마다 다른 값이라 캐시에는 넣지 않습니다
+  if (wantsBrave) payload.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
   return json(payload, 200, origin);
 }
 
@@ -636,9 +803,15 @@ export default {
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
+      kv: Boolean(env.PODOGUM_KV),
+      free_per_day: parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10),
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
         searxng: Boolean(env.SEARXNG_URL)
       }, 200, origin);
+    }
+
+    if (url.pathname === '/api/pass') {
+      return handlePass(request, env, origin);
     }
 
     if (url.pathname === '/api/search') {
