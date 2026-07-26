@@ -11,6 +11,8 @@
  */
 
 const ALLOWED_ORIGINS = [
+  'https://podogum.kr',
+  'https://www.podogum.kr',
   'https://podolang.kr',
   'https://www.podolang.kr',
   'https://byoungju-web.github.io',
@@ -55,14 +57,47 @@ function strip(text, limit) {
   return s.length > limit ? s.slice(0, limit) + '…' : s;
 }
 
+function sleep(ms) {
+  return new Promise(function (r) { setTimeout(r, ms); });
+}
+
 async function grab(url, options) {
   const opts = options || {};
-  const res = await fetch(url, {
-    headers: Object.assign({ 'User-Agent': UA, 'Accept': 'application/json' }, opts.headers || {}),
-    signal: AbortSignal.timeout(SOURCE_TIMEOUT)
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return opts.text ? await res.text() : await res.json();
+  const tries = opts.retries === undefined ? 2 : opts.retries;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= tries; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: Object.assign({ 'User-Agent': UA, 'Accept': 'application/json' }, opts.headers || {}),
+        signal: AbortSignal.timeout(SOURCE_TIMEOUT)
+      });
+    } catch (e) {
+      lastErr = new Error(e.name === 'TimeoutError' ? '시간 초과' : '연결 실패');
+      if (attempt === tries) throw lastErr;
+      await sleep(400 * (attempt + 1));
+      continue;
+    }
+
+    if (res.ok) return opts.text ? await res.text() : await res.json();
+
+    // 서버가 알려준 이유를 그대로 담습니다 (추측 대신 진단)
+    let why = '';
+    try {
+      const body = await res.text();
+      const m = /"error_message"\s*:\s*"([^"]{0,120})"/.exec(body)
+             || /"message"\s*:\s*"([^"]{0,120})"/.exec(body);
+      why = m ? m[1] : body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
+    } catch (e) { why = ''; }
+
+    lastErr = new Error('HTTP ' + res.status + (why ? ' · ' + why : ''));
+
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt === tries) throw lastErr;
+    await sleep(700 * (attempt + 1));
+  }
+  throw lastErr;
 }
 
 /* =======================================================
@@ -172,14 +207,7 @@ async function fromHackerNews(q) {
   }).filter(function (x) { return x.title; });
 }
 
-async function fromStackOverflow(q) {
-  const u = new URL('https://api.stackexchange.com/2.3/search/advanced');
-  u.searchParams.set('q', q);
-  u.searchParams.set('site', 'stackoverflow');
-  u.searchParams.set('order', 'desc');
-  u.searchParams.set('sort', 'relevance');
-  u.searchParams.set('pagesize', '6');
-  const data = await grab(u.toString());
+function shapeSo(data) {
   return (data.items || []).map(function (x) {
     return {
       title: strip(x.title, 130),
@@ -188,6 +216,28 @@ async function fromStackOverflow(q) {
       extra: '점수 ' + x.score + (x.is_answered ? ' · 해결됨' : '')
     };
   });
+}
+
+async function fromStackOverflow(q) {
+  const adv = new URL('https://api.stackexchange.com/2.3/search/advanced');
+  adv.searchParams.set('q', q);
+  adv.searchParams.set('site', 'stackoverflow');
+  adv.searchParams.set('pagesize', '6');
+
+  try {
+    return shapeSo(await grab(adv.toString()));
+  } catch (e) {
+    // advanced가 거부하면 제목 검색으로 한 번 더 (요구 파라미터가 더 적습니다)
+    const basic = new URL('https://api.stackexchange.com/2.3/search');
+    basic.searchParams.set('intitle', q);
+    basic.searchParams.set('site', 'stackoverflow');
+    basic.searchParams.set('pagesize', '6');
+    try {
+      return shapeSo(await grab(basic.toString(), { retries: 0 }));
+    } catch (e2) {
+      throw e;   // 첫 번째 에러가 원인 파악에 더 쓸모 있습니다
+    }
+  }
 }
 
 async function fromArxiv(q) {
@@ -215,11 +265,12 @@ async function fromArxiv(q) {
   return out;
 }
 
-async function fromOpenAlex(q) {
+async function fromOpenAlex(q, env) {
   const u = new URL('https://api.openalex.org/works');
   u.searchParams.set('search', q);
   u.searchParams.set('per-page', '6');
-  u.searchParams.set('mailto', 'podogum@podolang.kr'); // 폴라이트 풀
+  // 실제로 받는 메일 주소를 OPENALEX_MAIL에 넣으면 여유 있는 대역으로 처리됩니다
+  if (env && env.OPENALEX_MAIL) u.searchParams.set('mailto', env.OPENALEX_MAIL);
   const data = await grab(u.toString());
   return (data.results || []).map(function (x) {
     return {
