@@ -135,7 +135,21 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       <input id="api" type="text" placeholder="비워두면 이 페이지와 같은 도메인">
       <label for="bkey">BRAVE API KEY <span id="bkeyState"></span></label>
       <input id="bkey" type="password" autocomplete="off" placeholder="BSA... 로 시작하는 키">
-      <p class="hint">이 브라우저에만 저장됩니다. 검색할 때마다 검색 서버로 보내서 Brave를 부르는 데만 쓰고, 서버에는 남기지 않습니다. Cloudflare Secret에 이미 키를 넣으셨다면 비워두세요.</p>
+      <p class="hint">웹 검색에 씁니다. api-dashboard.search.brave.com 에서 발급합니다.</p>
+
+      <label for="skey">STACK OVERFLOW KEY</label>
+      <input id="skey" type="password" autocomplete="off" placeholder="선택 · stackapps.com 에서 무료 발급">
+      <p class="hint">없으면 Stack Overflow가 공용 IP 할당량에 걸려 대부분 막힙니다.</p>
+
+      <label for="mail">OPENALEX 연락 메일</label>
+      <input id="mail" type="email" autocomplete="off" placeholder="선택 · 실제로 받는 주소">
+      <p class="hint">논문 검색(OpenAlex)이 여유 있는 대역으로 처리됩니다. 키가 아니라 연락처입니다.</p>
+
+      <label for="sxng">SEARXNG 주소</label>
+      <input id="sxng" type="url" autocomplete="off" placeholder="선택 · https://searx.example.org">
+      <p class="hint">JSON 출력이 켜진 인스턴스여야 합니다. 이걸 넣으면 결과 융합이 실제로 작동하기 시작합니다.</p>
+
+      <p class="hint">위 값은 모두 <b>이 브라우저에만</b> 저장됩니다. 검색할 때마다 서버로 보내 해당 API를 부르는 데만 쓰고 서버에는 남기지 않습니다.</p>
       <label>사용할 소스</label>
       <div class="toggles" id="toggles"></div>
       <div class="row">
@@ -162,9 +176,13 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var LS_API = 'podogum_api';
   var LS_OFF = 'podogum_off';
   var LS_BKEY = 'podogum_brave';
+  var LS_SKEY = 'podogum_stackex';
+  var LS_MAIL = 'podogum_mail';
+  var LS_SXNG = 'podogum_searxng';
 
   // 원격 소스 (worker.js의 SOURCES와 id가 같아야 합니다)
   var REMOTE = [
+    { id: 'weather',  label: '날씨' },
     { id: 'brave',    label: 'Brave' },
     { id: 'searxng',  label: 'SearXNG' },
     { id: 'ddg',      label: 'DuckDuckGo' },
@@ -222,8 +240,10 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   function braveKey() { return (readLS(LS_BKEY, '') || '').trim(); }
   function apiHeaders() {
     var h = {};
-    var k = braveKey();
-    if (k) h['X-Brave-Key'] = k;
+    var b = braveKey();                       if (b) h['X-Brave-Key'] = b;
+    var s2 = (readLS(LS_SKEY, '') || '').trim(); if (s2) h['X-Stackex-Key'] = s2;
+    var m = (readLS(LS_MAIL, '') || '').trim();  if (m) h['X-Openalex-Mail'] = m;
+    var x = (readLS(LS_SXNG, '') || '').trim();  if (x) h['X-Searxng-Url'] = x;
     return h;
   }
 
@@ -560,9 +580,13 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   function initPanel() {
     var panel = $('panel'), apiInput = $('api'), toggles = $('toggles');
     var keyInput = $('bkey'), keyState = $('bkeyState');
+    var sInput = $('skey'), mInput = $('mail'), xInput = $('sxng');
     apiInput.value = readLS(LS_API, '');
     apiInput.placeholder = '비워두면 이 페이지와 같은 도메인';
     keyInput.value = braveKey();
+    sInput.value = readLS(LS_SKEY, '');
+    mInput.value = readLS(LS_MAIL, '');
+    xInput.value = readLS(LS_SXNG, '');
 
     function paintKeyState() {
       var k = braveKey();
@@ -589,8 +613,14 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       var v = apiInput.value.trim().replace(/\/+$/, '');
       if (v) writeLS(LS_API, v); else { try { localStorage.removeItem(LS_API); } catch (e) {} }
 
-      var k = keyInput.value.trim();
-      if (k) writeLS(LS_BKEY, k); else { try { localStorage.removeItem(LS_BKEY); } catch (e) {} }
+      function put(lsKey, val) {
+        if (val) writeLS(lsKey, val);
+        else { try { localStorage.removeItem(lsKey); } catch (e) {} }
+      }
+      put(LS_BKEY, keyInput.value.trim());
+      put(LS_SKEY, sInput.value.trim());
+      put(LS_MAIL, mInput.value.trim());
+      put(LS_SXNG, xInput.value.trim().replace(/\/+$/, ''));
       paintKeyState();
       var off = [];
       Array.prototype.forEach.call(toggles.querySelectorAll('input'), function (cb) {
