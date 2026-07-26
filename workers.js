@@ -300,11 +300,12 @@ async function fromNpm(q) {
   const data = await grab(u.toString());
   return (data.objects || []).map(function (o) {
     const p = o.package || {};
+    const repo = ghNorm(p.links && p.links.repository);
     return {
       title: strip(p.name, 130),
-      url: (p.links && p.links.npm) || ('https://www.npmjs.com/package/' + p.name),
+      url: repo || (p.links && p.links.npm) || ('https://www.npmjs.com/package/' + p.name),
       snippet: strip(p.description, 200),
-      extra: 'v' + (p.version || '')
+      extra: 'npm v' + (p.version || '') + (repo ? ' · npmjs.com/package/' + p.name : '')
     };
   }).filter(function (x) { return x.title; });
 }
@@ -400,6 +401,47 @@ async function fromWeather(q) {
   }];
 }
 
+/* github.com 주소를 하나의 표준형으로 맞춥니다.
+   npm·PyPI 결과를 저장소 주소로 바꿔주면 GitHub 결과와 실제로 겹쳐서
+   여러 소스가 같은 라이브러리를 가리킬 때 RRF가 비로소 작동합니다. */
+function ghNorm(u) {
+  if (!u) return '';
+  const m = /github\.com[/:]([^/\s]+)\/([^/#?\s]+)/.exec(String(u));
+  if (!m) return '';
+  return 'https://github.com/' + m[1] + '/' + m[2].replace(/\.git$/, '');
+}
+
+function pickRepo(urls) {
+  const keys = ['Source', 'Source Code', 'Repository', 'Code', 'GitHub', 'Homepage', 'homepage'];
+  for (let i = 0; i < keys.length; i++) {
+    const hit = ghNorm(urls[keys[i]]);
+    if (hit) return hit;
+  }
+  for (const k in urls) {
+    const hit = ghNorm(urls[k]);
+    if (hit) return hit;
+  }
+  return '';
+}
+
+/* -------- PyPI --------
+   PyPI에는 공개 검색 API가 없습니다. 대신 이름이 정확히 맞을 때
+   패키지 정보를 바로 가져옵니다. "fastapi" 처럼 이름을 아는 경우에 걸립니다. */
+async function fromPypi(q) {
+  const name = q.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!/^[a-z0-9._-]{2,60}$/.test(name)) throw new Error('패키지 이름 형태가 아님');
+  const data = await grab('https://pypi.org/pypi/' + encodeURIComponent(name) + '/json', { retries: 0 });
+  const info = data.info || {};
+  if (!info.name) throw new Error('결과 없음');
+  const repo = pickRepo(info.project_urls || {}) || ghNorm(info.home_page);
+  return [{
+    title: strip(info.name, 130),
+    url: repo || ('https://pypi.org/project/' + info.name + '/'),
+    snippet: strip(info.summary, 200),
+    extra: 'PyPI v' + (info.version || '') + (repo ? ' · pypi.org/project/' + info.name : '')
+  }];
+}
+
 // id, 표시명, RRF 가중치, 어댑터
 const SOURCES = [
   { id: 'weather',  label: '날씨',           weight: 2.0, fn: fromWeather },
@@ -412,7 +454,8 @@ const SOURCES = [
   { id: 'arxiv',    label: 'arXiv',          weight: 0.7, fn: fromArxiv },
   { id: 'openalex', label: 'OpenAlex',       weight: 0.7, fn: fromOpenAlex },
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
-  { id: 'npm',      label: 'npm',            weight: 0.6, fn: fromNpm }
+  { id: 'npm',      label: 'npm',            weight: 0.6, fn: fromNpm },
+  { id: 'pypi',     label: 'PyPI',           weight: 0.6, fn: fromPypi }
 ];
 
 /* =======================================================
