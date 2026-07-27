@@ -362,6 +362,8 @@ async function fromNotion(q, env, opts) {
   return out;
 }
 
+
+
 async function fromSearxng(q, env, opts) {
   const raw = (opts && opts.searxngUrl) || env.SEARXNG_URL;
   if (!raw) throw new Error('인스턴스 주소 없음');
@@ -903,7 +905,6 @@ const SOURCES = [
   { id: 'brave',    label: 'Brave',          weight: 1.4, fn: fromBrave },
   { id: 'tavily',   label: 'Tavily',         weight: 1.4, fn: fromTavily },
   { id: 'searxng',  label: 'SearXNG',        weight: 1.4, fn: fromSearxng },
-  { id: 'notion',   label: '내 노션',        weight: 1.5, fn: fromNotion },
   { id: 'ddg',      label: 'DuckDuckGo',     weight: 0.9, fn: fromDuckDuckGo },
   { id: 'wiki',     label: 'Wikipedia',      weight: 1.1, fn: fromWikipedia },
   { id: 'hn',       label: 'Hacker News',    weight: 0.8, fn: fromHackerNews },
@@ -911,6 +912,7 @@ const SOURCES = [
   { id: 'arxiv',    label: 'arXiv',          weight: 0.7, fn: fromArxiv },
   { id: 'openalex', label: 'OpenAlex',       weight: 0.7, fn: fromOpenAlex },
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
+  { id: 'notion',   label: '내 노션',        weight: 1.5, fn: fromNotion },
   { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages },
   { id: 'product',  label: '제품',           weight: 1.8, fn: fromProduct }
 ];
