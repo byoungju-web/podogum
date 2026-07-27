@@ -737,6 +737,79 @@ async function fromPackages(q) {
   return out;
 }
 
+/* =======================================================
+   제품 (Open Food Facts)
+
+   키가 없고 광고가 없는 공개 식품 데이터베이스입니다.
+   성분표·첨가물·영양등급이 사람들 손으로 모여 있고, 돈으로 순위를 살 수 없습니다.
+
+   두 가지 경우에만 켜집니다.
+     1. 검색어가 바코드 숫자일 때  → 그 제품을 바로 조회
+     2. 성분·첨가물 같은 낱말이 있을 때 → 제품명으로 검색
+   그 외에는 조용히 꺼집니다. 아무 질문에나 켜지면 npm 때처럼 엉뚱한 결과만 늘어납니다.
+   ======================================================= */
+
+const PRODUCT_HINT = /(성분|첨가물|첨가제|리콜|무해|유해|안전한가|칼로리|영양|당류|나트륨|알레르기|들어있|들어가|함유)/;
+const NUTRI = { a: '영양등급 A (가장 좋음)', b: '영양등급 B', c: '영양등급 C', d: '영양등급 D', e: '영양등급 E (가장 나쁨)' };
+const NOVA = { 1: '자연식품', 2: '가공 재료', 3: '가공식품', 4: '초가공식품' };
+
+function shapeProduct(p) {
+  if (!p || !p.code) return null;
+  const name = (p.product_name_ko || p.product_name || '').trim();
+  if (!name) return null;
+
+  const brand = (p.brands || '').split(',')[0].trim();
+  const bits = [];
+
+  if (p.nutriscore_grade && NUTRI[p.nutriscore_grade]) bits.push(NUTRI[p.nutriscore_grade]);
+  if (p.nova_group && NOVA[p.nova_group]) bits.push(NOVA[p.nova_group]);
+
+  const adds = (p.additives_tags || []).length;
+  if (adds) bits.push('첨가물 ' + adds + '개');
+
+  const alg = (p.allergens_tags || []).length;
+  if (alg) bits.push('알레르기 표시 ' + alg + '개');
+
+  const ing = strip(p.ingredients_text_ko || p.ingredients_text || '', 220);
+
+  return {
+    title: strip(name + (brand ? ' · ' + brand : ''), 130),
+    url: 'https://world.openfoodfacts.org/product/' + p.code,
+    snippet: ing || strip((p.categories || '').split(',').slice(0, 3).join(', '), 200),
+    extra: bits.length ? bits.join(' · ') : ('바코드 ' + p.code)
+  };
+}
+
+async function fromProduct(q) {
+  const t = q.trim();
+
+  // 1. 바코드
+  if (/^\d{8,14}$/.test(t)) {
+    const u = 'https://world.openfoodfacts.org/api/v2/product/' + t + '.json'
+            + '?fields=code,product_name,product_name_ko,brands,nutriscore_grade,nova_group,'
+            + 'additives_tags,allergens_tags,ingredients_text,ingredients_text_ko,categories';
+    const data = await grab(u, { retries: 0, timeout: 3500 });
+    const one = shapeProduct(data.product);
+    if (!one) throw new Error('등록되지 않은 바코드');
+    return [one];
+  }
+
+  // 2. 성분·안전 관련 낱말이 있을 때만 제품명으로 검색
+  if (!PRODUCT_HINT.test(t)) throw new Error('제품 질문 아님');
+
+  const u = new URL('https://kr.openfoodfacts.org/cgi/search.pl');
+  u.searchParams.set('search_terms', t.replace(PRODUCT_HINT, '').trim() || t);
+  u.searchParams.set('search_simple', '1');
+  u.searchParams.set('action', 'process');
+  u.searchParams.set('json', '1');
+  u.searchParams.set('page_size', '5');
+  const data = await grab(u.toString(), { retries: 0, timeout: 4000 });
+
+  const out = (data.products || []).map(shapeProduct).filter(Boolean);
+  if (!out.length) throw new Error('결과 없음');
+  return out;
+}
+
 // id, 표시명, RRF 가중치, 어댑터
 const SOURCES = [
   { id: 'weather',  label: '날씨',           weight: 2.0, fn: fromWeather },
@@ -749,7 +822,8 @@ const SOURCES = [
   { id: 'arxiv',    label: 'arXiv',          weight: 0.7, fn: fromArxiv },
   { id: 'openalex', label: 'OpenAlex',       weight: 0.7, fn: fromOpenAlex },
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
-  { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages }
+  { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages },
+  { id: 'product',  label: '제품',           weight: 1.8, fn: fromProduct }
 ];
 
 /* =======================================================
