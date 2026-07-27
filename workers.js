@@ -74,7 +74,7 @@ async function grab(url, options) {
     try {
       res = await fetch(url, {
         headers: Object.assign({ 'User-Agent': UA, 'Accept': 'application/json' }, opts.headers || {}),
-        signal: AbortSignal.timeout(SOURCE_TIMEOUT)
+        signal: AbortSignal.timeout(opts.timeout || SOURCE_TIMEOUT)
       });
     } catch (e) {
       const timedOut = e.name === 'TimeoutError';
@@ -408,7 +408,12 @@ async function fromArxiv(q) {
   u.searchParams.set('search_query', 'all:' + q);
   u.searchParams.set('start', '0');
   u.searchParams.set('max_results', '6');
-  const xml = await grab(u.toString(), { text: true, headers: { 'Accept': 'application/atom+xml' } });
+  // arXiv 서버는 자주 느립니다. 논문은 있으면 좋은 정도라
+  // 2.5초 안에 안 오면 포기합니다. 이것 하나가 전체를 5초로 끌던 원인이었습니다.
+  const xml = await grab(u.toString(), {
+    text: true, retries: 0, timeout: 2500,
+    headers: { 'Accept': 'application/atom+xml' }
+  });
 
   const out = [];
   const entries = xml.split('<entry>').slice(1);
