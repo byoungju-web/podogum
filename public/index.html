@@ -64,6 +64,12 @@ button,input{font:inherit;color:inherit}
 .summary{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:9px;letter-spacing:.02em}
 .summary b{color:var(--grape)}
 
+/* 할당량 줄. 위 summary 와 같은 눈금에 맞춥니다.
+   규칙이 없으면 body 기본 16px로 렌더링돼 이 한 줄만 크게 튀어나옵니다. */
+.quota{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:4px;letter-spacing:.02em}
+.quota b{color:var(--grape)}
+.quota.out{color:var(--wine)}
+
 .viewtabs{display:flex;gap:6px;margin-top:10px}
 .viewtabs button{
   border:1px solid var(--edge);background:#fff;border-radius:999px;
@@ -492,6 +498,30 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     });
   }
 
+  // worker 가 이미 weight/(K+rank) 로 계산해둔 융합 결과를 그대로 받습니다.
+  // 예전에는 bysource 원본을 프런트에서 다시 합쳤는데, 원본에는 score 가
+  // 없어서 모든 문서가 1/60 로 똑같아졌습니다. 순위가 "몇 곳에서 나왔나"
+  // 하나로만 정해지고 가중치도 랭크도 전부 버려지고 있었습니다.
+  function adoptFused(results) {
+    (results || []).forEach(function (r) {
+      if (!r.title) return;
+      var key = normUrl(r.url) || ('t:' + r.title);
+      var doc = docs.get(key);
+      if (!doc) {
+        doc = { url: r.url, title: r.title, snippet: r.snippet || '',
+                extra: r.extra || '', sources: [], score: 0 };
+        docs.set(key, doc);
+        order.push(key);
+      }
+      doc.score += r.score || 0;
+      (r.sources || []).forEach(function (s) {
+        if (doc.sources.indexOf(s) === -1) doc.sources.push(s);
+      });
+      if (!doc.snippet && r.snippet) doc.snippet = r.snippet;
+      if (!doc.extra && r.extra) doc.extra = r.extra;
+    });
+  }
+
   function fusedList() {
     var list = order.map(function (k) { return docs.get(k); });
     list.sort(function (a, b) {
@@ -511,15 +541,20 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
   }
 
-  function makeCard(doc, index) {
-    var multi = doc.sources.length > 1;
+  // plain = 소스별 보기. 그 화면은 한 소스의 원본 순서를 그대로 늘어놓는 곳이라
+  // 융합 점수도, 소스 이름표도 의미가 없습니다. 점수는 애초에 없는 값이고
+  // 소스 이름은 바로 위 제목줄에 이미 적혀 있습니다.
+  function makeCard(doc, index, plain) {
+    var multi = !plain && doc.sources.length > 1;
     var card = el('article', 'card' + (multi ? ' multi' : '') + (doc.sources[0] === 'podo' && !multi ? ' mine' : ''));
 
     var badges = el('div', 'badges');
     badges.appendChild(el('span', 'rank', (index + 1) + '.'));
-    if (multi) badges.appendChild(el('span', 'badge hot', doc.sources.length + '곳 일치'));
-    doc.sources.forEach(function (s) { badges.appendChild(el('span', 'badge', labelOf(s))); });
-    badges.appendChild(el('span', 'badge', doc.score.toFixed(4)));
+    if (!plain) {
+      if (multi) badges.appendChild(el('span', 'badge hot', doc.sources.length + '곳 일치'));
+      doc.sources.forEach(function (s) { badges.appendChild(el('span', 'badge', labelOf(s))); });
+      badges.appendChild(el('span', 'badge', (doc.score || 0).toFixed(4)));
+    }
     card.appendChild(badges);
 
     if (doc.url) {
@@ -561,8 +596,8 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       items.forEach(function (it, i) {
         g.appendChild(makeCard({
           url: it.url, title: it.title, snippet: it.snippet || '',
-          extra: it.extra || '', sources: [s.id], score: it.score || 0
-        }, i));
+          extra: it.extra || '', sources: [s.id]
+        }, i, true));
       });
       out.appendChild(g);
     });
@@ -716,19 +751,22 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       var packs = {};
       (body.bysource || []).forEach(function (p) { packs[p.id] = p.items || []; });
 
+      // 칸 표시와 소스별 탭은 원본으로, 융합 순위는 worker 가 계산한 결과로.
+      // 이 둘을 섞으면 점수가 전부 1/60 으로 뭉개집니다.
       activeRemote.forEach(function (s) {
         var st = stats[s.id] || {};
         var items = packs[s.id] || [];
         var ms = st.ms ? ' · ' + st.ms + 'ms' : '';
+        bySource[s.id] = items;
         if (st.ok === false) {
           setCell(s.id, 'error', st.error || '실패');
         } else if (!items.length) {
           setCell(s.id, 'zero', '0건' + ms);
         } else {
-          ingest(s.id, items);
           setCell(s.id, 'done', items.length + '건' + ms);
         }
       });
+      adoptFused(body.results);
 
       render();
       updateSummary(total, total, t0);
