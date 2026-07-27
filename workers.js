@@ -461,26 +461,6 @@ async function fromGithub(q) {
   });
 }
 
-async function fromNpm(q) {
-  // npm 저장소는 영문 패키지 이름으로 이루어져 있습니다.
-  // 한글로만 된 질문은 제대로 맞을 수가 없고, 엉뚱한 패키지만 딸려옵니다.
-  if (!/[A-Za-z][A-Za-z0-9._-]/.test(q)) throw new Error('패키지 검색어 아님');
-  const u = new URL('https://registry.npmjs.org/-/v1/search');
-  u.searchParams.set('text', q);
-  u.searchParams.set('size', '5');
-  const data = await grab(u.toString());
-  return (data.objects || []).map(function (o) {
-    const p = o.package || {};
-    const repo = ghNorm(p.links && p.links.repository);
-    return {
-      title: strip(p.name, 130),
-      url: repo || (p.links && p.links.npm) || ('https://www.npmjs.com/package/' + p.name),
-      snippet: strip(p.description, 200),
-      extra: 'npm v' + (p.version || '') + (repo ? ' · npmjs.com/package/' + p.name : '')
-    };
-  }).filter(function (x) { return x.title; });
-}
-
 /* -------- 날씨 (Open-Meteo, 키 없음) --------
    검색어에 날씨 낱말과 지명이 같이 있을 때만 켜집니다.
    "부산에 비가 오냐" 같은 질문에 문서가 아니라 실제 예보로 답하기 위한 소스입니다. */
@@ -595,22 +575,161 @@ function pickRepo(urls) {
   return '';
 }
 
-/* -------- PyPI --------
-   PyPI에는 공개 검색 API가 없습니다. 대신 이름이 정확히 맞을 때
-   패키지 정보를 바로 가져옵니다. "fastapi" 처럼 이름을 아는 경우에 걸립니다. */
-async function fromPypi(q) {
+
+/* =======================================================
+   패키지 저장소 묶음
+
+   일곱 곳을 Worker 안에서 한꺼번에 부르고 결과를 하나로 합칩니다.
+   화면에는 칸 하나로 보이지만 속은 일곱 갈래입니다.
+   주소는 되도록 GitHub 저장소로 맞춰서 GitHub 검색 결과와 겹치게 합니다.
+   ======================================================= */
+
+async function npmSearch(q) {
+  const u = new URL('https://registry.npmjs.org/-/v1/search');
+  u.searchParams.set('text', q);
+  u.searchParams.set('size', '4');
+  const data = await grab(u.toString(), { retries: 0 });
+  return (data.objects || []).map(function (o) {
+    const p = o.package || {};
+    const repo = ghNorm(p.links && p.links.repository);
+    return {
+      title: strip(p.name, 130),
+      url: repo || ('https://www.npmjs.com/package/' + p.name),
+      snippet: strip(p.description, 200),
+      extra: 'npm v' + (p.version || '')
+    };
+  }).filter(function (x) { return x.title; });
+}
+
+async function pypiLookup(q) {
   const name = q.trim().toLowerCase().replace(/\s+/g, '-');
-  if (!/^[a-z0-9._-]{2,60}$/.test(name)) throw new Error('패키지 이름 형태가 아님');
+  if (!/^[a-z0-9._-]{2,60}$/.test(name)) return [];
   const data = await grab('https://pypi.org/pypi/' + encodeURIComponent(name) + '/json', { retries: 0 });
   const info = data.info || {};
-  if (!info.name) throw new Error('결과 없음');
+  if (!info.name) return [];
   const repo = pickRepo(info.project_urls || {}) || ghNorm(info.home_page);
   return [{
     title: strip(info.name, 130),
     url: repo || ('https://pypi.org/project/' + info.name + '/'),
     snippet: strip(info.summary, 200),
-    extra: 'PyPI v' + (info.version || '') + (repo ? ' · pypi.org/project/' + info.name : '')
+    extra: 'PyPI v' + (info.version || '')
   }];
+}
+
+async function cratesSearch(q) {
+  const u = new URL('https://crates.io/api/v1/crates');
+  u.searchParams.set('q', q);
+  u.searchParams.set('per_page', '4');
+  const data = await grab(u.toString(), { retries: 0 });
+  return (data.crates || []).map(function (c) {
+    const repo = ghNorm(c.repository);
+    return {
+      title: strip(c.name, 130),
+      url: repo || ('https://crates.io/crates/' + c.name),
+      snippet: strip(c.description, 200),
+      extra: 'crates.io v' + (c.newest_version || c.max_version || '')
+    };
+  }).filter(function (x) { return x.title; });
+}
+
+async function mavenSearch(q) {
+  const u = new URL('https://search.maven.org/solrsearch/select');
+  u.searchParams.set('q', q);
+  u.searchParams.set('rows', '4');
+  u.searchParams.set('wt', 'json');
+  const data = await grab(u.toString(), { retries: 0 });
+  const docs = ((data.response || {}).docs) || [];
+  return docs.map(function (d) {
+    if (!d.g || !d.a) return null;
+    return {
+      title: strip(d.a, 130),
+      // Maven 검색 결과에는 저장소 주소가 없어서 GitHub과 겹치지 않습니다
+      url: 'https://central.sonatype.com/artifact/' + d.g + '/' + d.a,
+      snippet: strip(d.g, 200),
+      extra: 'Maven v' + (d.latestVersion || d.v || '')
+    };
+  }).filter(Boolean);
+}
+
+async function nugetSearch(q) {
+  const u = new URL('https://azuresearch-usnc.nuget.org/query');
+  u.searchParams.set('q', q);
+  u.searchParams.set('take', '4');
+  const data = await grab(u.toString(), { retries: 0 });
+  return (data.data || []).map(function (p) {
+    if (!p.id) return null;
+    const repo = ghNorm(p.projectUrl);
+    return {
+      title: strip(p.id, 130),
+      url: repo || ('https://www.nuget.org/packages/' + p.id),
+      snippet: strip(p.description, 200),
+      extra: 'NuGet v' + (p.version || '')
+    };
+  }).filter(Boolean);
+}
+
+async function gemsSearch(q) {
+  const u = new URL('https://rubygems.org/api/v1/search.json');
+  u.searchParams.set('query', q);
+  const list = await grab(u.toString(), { retries: 0 });
+  return (Array.isArray(list) ? list : []).slice(0, 4).map(function (g) {
+    if (!g.name) return null;
+    const repo = ghNorm(g.source_code_uri) || ghNorm(g.homepage_uri);
+    return {
+      title: strip(g.name, 130),
+      url: repo || ('https://rubygems.org/gems/' + g.name),
+      snippet: strip(g.info, 200),
+      extra: 'RubyGems v' + (g.version || '')
+    };
+  }).filter(Boolean);
+}
+
+async function packagistSearch(q) {
+  const u = new URL('https://packagist.org/search.json');
+  u.searchParams.set('q', q);
+  u.searchParams.set('per_page', '4');
+  const data = await grab(u.toString(), { retries: 0 });
+  return (data.results || []).map(function (p) {
+    if (!p.name) return null;
+    const repo = ghNorm(p.repository) || ghNorm(p.url);
+    return {
+      title: strip(p.name, 130),
+      url: repo || p.url || ('https://packagist.org/packages/' + p.name),
+      snippet: strip(p.description, 200),
+      extra: 'Packagist'
+    };
+  }).filter(Boolean);
+}
+
+async function fromPackages(q) {
+  // 저장소들은 전부 영문 패키지 이름으로 되어 있습니다.
+  // 한글로만 된 질문에는 맞을 수 있는 게 없습니다.
+  if (!/[A-Za-z][A-Za-z0-9._-]/.test(q)) throw new Error('패키지 검색어 아님');
+
+  const settled = await Promise.allSettled([
+    npmSearch(q), pypiLookup(q), cratesSearch(q), mavenSearch(q),
+    nugetSearch(q), gemsSearch(q), packagistSearch(q)
+  ]);
+
+  const lists = [];
+  settled.forEach(function (r) {
+    if (r.status === 'fulfilled' && r.value && r.value.length) lists.push(r.value);
+  });
+  if (!lists.length) throw new Error('결과 없음');
+
+  // 이어붙이면 뒤쪽 저장소의 1등이 한참 아래 순위를 받습니다.
+  // 각 저장소의 1등끼리, 2등끼리 번갈아 뽑아야 공평합니다.
+  const out = [];
+  let depth = 0;
+  while (out.length < 14) {
+    let added = false;
+    for (let i = 0; i < lists.length; i++) {
+      if (lists[i][depth]) { out.push(lists[i][depth]); added = true; }
+    }
+    if (!added) break;
+    depth++;
+  }
+  return out;
 }
 
 // id, 표시명, RRF 가중치, 어댑터
@@ -625,8 +744,7 @@ const SOURCES = [
   { id: 'arxiv',    label: 'arXiv',          weight: 0.7, fn: fromArxiv },
   { id: 'openalex', label: 'OpenAlex',       weight: 0.7, fn: fromOpenAlex },
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
-  { id: 'npm',      label: 'npm',            weight: 0.6, fn: fromNpm },
-  { id: 'pypi',     label: 'PyPI',           weight: 0.6, fn: fromPypi }
+  { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages }
 ];
 
 /* =======================================================
