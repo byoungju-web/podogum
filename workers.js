@@ -456,7 +456,18 @@ async function fromWikipedia(q) {
   return out;
 }
 
+/* 개발·학술 소스는 영문 기술 용어를 다루는 색인입니다.
+   "부산 가볼만한곳" 에 맞을 수 있는 문서가 애초에 없는데도 각각 1초씩 쓰고
+   0건을 냅니다. 한글만으로 된 질문이면 아예 부르지 않습니다.
+   영문이 섞여 있으면(예: "부산 airbnb") 그대로 켭니다. */
+function looksTechnical(q) {
+  const latin = (q.match(/[A-Za-z]/g) || []).length;
+  if (latin >= 3) return true;                 // 영문 낱말이 있으면 통과
+  return /[0-9]{2,}|[<>{}/\\#@$]|에러|오류|버그|코드|함수|라이브러리|프레임워크|알고리즘|논문|깃허브/.test(q);
+}
+
 async function fromHackerNews(q) {
+  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://hn.algolia.com/api/v1/search');
   u.searchParams.set('query', q);
   u.searchParams.set('hitsPerPage', '6');
@@ -483,6 +494,7 @@ function shapeSo(data) {
 }
 
 async function fromStackOverflow(q, env, opts) {
+  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://api.stackexchange.com/2.3/search/advanced');
   u.searchParams.set('q', q);
   u.searchParams.set('site', 'stackoverflow');
@@ -495,6 +507,7 @@ async function fromStackOverflow(q, env, opts) {
 }
 
 async function fromArxiv(q) {
+  if (!looksTechnical(q)) throw new Error('논문 질문 아님');
   const u = new URL('https://export.arxiv.org/api/query');
   u.searchParams.set('search_query', 'all:' + q);
   u.searchParams.set('start', '0');
@@ -525,6 +538,7 @@ async function fromArxiv(q) {
 }
 
 async function fromOpenAlex(q, env, opts) {
+  if (!looksTechnical(q)) throw new Error('논문 질문 아님');
   const u = new URL('https://api.openalex.org/works');
   u.searchParams.set('search', q);
   u.searchParams.set('per-page', '6');
@@ -550,6 +564,7 @@ async function fromOpenAlex(q, env, opts) {
 }
 
 async function fromGithub(q) {
+  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://api.github.com/search/repositories');
   u.searchParams.set('q', q);
   u.searchParams.set('per_page', '6');
