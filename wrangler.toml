@@ -7,3 +7,6 @@ directory = "./public/"
 
 [placement]
 mode = "smart"
+[[kv_namespaces]]
+binding = "PODOGUM_KV"
+id = "80c98ea6e83d4eca84cd17bb9e189cc9"
