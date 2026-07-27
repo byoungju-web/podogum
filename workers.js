@@ -21,7 +21,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 const CACHE_TTL = 1800;        // 30분
-const SOURCE_TIMEOUT = 6000;   // 소스별 6초
+const SOURCE_TIMEOUT = 4500;   // 소스별 4.5초
 const UA = 'podogum/2.0 (+https://podolang.kr)';
 const RRF_K = 60;
 
@@ -124,7 +124,9 @@ async function grab(url, options) {
    ======================================================= */
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  // 한국 시간 자정에 초기화되도록 9시간을 더해서 날짜를 셉니다.
+  // UTC로 세면 한국에서는 아침 9시에 무료 횟수가 되살아납니다.
+  return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 async function sha8(text) {
@@ -319,7 +321,7 @@ async function wikiLang(q, lang) {
   u.searchParams.set('action', 'query');
   u.searchParams.set('list', 'search');
   u.searchParams.set('srsearch', q);
-  u.searchParams.set('srlimit', '5');
+  u.searchParams.set('srlimit', '3');
   u.searchParams.set('format', 'json');
   u.searchParams.set('origin', '*');
   const data = await grab(u.toString());
@@ -332,10 +334,30 @@ async function wikiLang(q, lang) {
   });
 }
 
+/* 위키백과 검색은 질문에서 흔한 낱말 하나만 걸려도 문서를 돌려줍니다.
+   "트럼프의 미래" 에 "문재인 정부" 가 나오는 식입니다.
+   그래서 각 언어의 1순위는 그대로 두고, 2순위부터는
+   제목과 검색어가 실제로 겹치는지 확인합니다. */
+function shareWord(title, q) {
+  const qs = q.toLowerCase();
+  const ts = title.toLowerCase();
+  if (qs.indexOf(ts) !== -1) return true;
+  const words = ts.split(/[\s·,()\[\]:–—-]+/).filter(function (w) { return w.length >= 2; });
+  for (let i = 0; i < words.length; i++) {
+    if (qs.indexOf(words[i]) !== -1) return true;
+  }
+  return false;
+}
+
 async function fromWikipedia(q) {
   const both = await Promise.allSettled([wikiLang(q, 'ko'), wikiLang(q, 'en')]);
   let out = [];
-  both.forEach(function (r) { if (r.status === 'fulfilled') out = out.concat(r.value); });
+  both.forEach(function (r) {
+    if (r.status !== 'fulfilled') return;
+    r.value.forEach(function (item, i) {
+      if (i === 0 || shareWord(item.title, q)) out.push(item);
+    });
+  });
   if (!out.length) throw new Error('결과 없음');
   return out;
 }
@@ -437,6 +459,9 @@ async function fromGithub(q) {
 }
 
 async function fromNpm(q) {
+  // npm 저장소는 영문 패키지 이름으로 이루어져 있습니다.
+  // 한글로만 된 질문은 제대로 맞을 수가 없고, 엉뚱한 패키지만 딸려옵니다.
+  if (!/[A-Za-z][A-Za-z0-9._-]/.test(q)) throw new Error('패키지 검색어 아님');
   const u = new URL('https://registry.npmjs.org/-/v1/search');
   u.searchParams.set('text', q);
   u.searchParams.set('size', '5');
@@ -768,6 +793,10 @@ async function handleSearch(request, env, ctx, origin) {
     total: fused.length,
     overlap: overlap,
     results: fused.slice(0, 40),
+    // 소스별 원본. 화면이 이걸로 칸을 채우고 자체 융합도 합니다.
+    bysource: perSource.map(function (p) {
+      return { id: p.id, items: p.items };
+    }),
     stats: stats,
     fusion: 'RRF k=' + RRF_K,
     elapsed: Date.now() - started,
