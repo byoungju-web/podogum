@@ -37,7 +37,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -72,10 +72,16 @@ async function grab(url, options) {
   for (let attempt = 0; attempt <= tries; attempt++) {
     let res;
     try {
-      res = await fetch(url, {
+      const init = {
+        method: opts.method || 'GET',
         headers: Object.assign({ 'User-Agent': UA, 'Accept': 'application/json' }, opts.headers || {}),
         signal: AbortSignal.timeout(opts.timeout || SOURCE_TIMEOUT)
-      });
+      };
+      if (opts.body) {
+        init.body = opts.body;
+        if (!init.headers['Content-Type']) init.headers['Content-Type'] = 'application/json';
+      }
+      res = await fetch(url, init);
     } catch (e) {
       const timedOut = e.name === 'TimeoutError';
       lastErr = new Error(timedOut ? '시간 초과' : '연결 실패');
@@ -273,6 +279,87 @@ async function fromBrave(q, env, opts) {
   return ((data.web || {}).results || []).map(function (x) {
     return { title: strip(x.title, 130), url: x.url, snippet: strip(x.description, 200) };
   });
+}
+
+
+/* -------- Tavily --------
+   Brave와 같은 종합 웹 검색입니다. 둘 다 붙여두면 서로 겹치는 문서가 생기고,
+   그래야 일반 질문에서도 RRF 융합이 실제로 작동합니다.
+   지금까지 종합 웹 엔진이 Brave 하나뿐이라 비어 있던 자리입니다. */
+async function fromTavily(q, env, opts) {
+  const key = opts && opts.allowedTavilyKey;
+  if (!key) throw new Error((opts && opts.tavilyReason) || 'Tavily 키 없음');
+  const data = await grab('https://api.tavily.com/search', {
+    method: 'POST',
+    retries: 0,
+    headers: { 'Authorization': 'Bearer ' + key },
+    body: JSON.stringify({
+      query: q,
+      max_results: 8,
+      search_depth: 'basic',      // 1크레딧. advanced 는 2크레딧입니다.
+      include_answer: false
+    })
+  });
+  return (data.results || []).map(function (x) {
+    return { title: strip(x.title, 130), url: x.url, snippet: strip(x.content, 200) };
+  }).filter(function (x) { return x.title && x.url; });
+}
+
+
+/* -------- 내 노션 --------
+   웹이 아니라 내 것을 뒤집니다. "이거 우리가 전에 검토했었나" 에는
+   구글도 네이버도 답할 수 없고, 내 노션에만 답이 있습니다.
+
+   토큰은 브라우저에만 저장되고 서버에 남기지 않습니다. 다만 노션 API는
+   브라우저에서 직접 부를 수 없어서 요청이 이 Worker를 거쳐 갑니다.
+   그래서 안내문에서 읽기 전용, 필요한 페이지만 연결하도록 권합니다. */
+
+function notionTitle(item) {
+  // 데이터베이스는 맨 위에 title 배열이 있습니다
+  if (Array.isArray(item.title) && item.title.length) {
+    return item.title.map(function (t) { return t.plain_text || ''; }).join('');
+  }
+  // 페이지는 속성 중 type 이 title 인 것을 찾아야 합니다
+  const props = item.properties || {};
+  for (const k in props) {
+    const p = props[k];
+    if (p && p.type === 'title' && Array.isArray(p.title) && p.title.length) {
+      return p.title.map(function (t) { return t.plain_text || ''; }).join('');
+    }
+  }
+  return '';
+}
+
+async function fromNotion(q, env, opts) {
+  const token = opts && opts.notionToken;
+  if (!token) throw new Error('노션 토큰 없음');
+
+  const data = await grab('https://api.notion.com/v1/search', {
+    method: 'POST',
+    retries: 0,
+    timeout: 4000,
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Notion-Version': '2022-06-28'
+    },
+    body: JSON.stringify({ query: q, page_size: 8 })
+  });
+
+  const out = (data.results || []).map(function (item) {
+    const title = strip(notionTitle(item), 130);
+    if (!title || !item.url) return null;
+    const when = (item.last_edited_time || '').slice(0, 10);
+    return {
+      title: title,
+      url: item.url,
+      snippet: '',
+      extra: (item.object === 'database' ? '노션 데이터베이스' : '노션 페이지')
+             + (when ? ' · 수정 ' + when : '')
+    };
+  }).filter(Boolean);
+
+  if (!out.length) throw new Error('결과 없음');
+  return out;
 }
 
 async function fromSearxng(q, env, opts) {
@@ -814,7 +901,9 @@ async function fromProduct(q) {
 const SOURCES = [
   { id: 'weather',  label: '날씨',           weight: 2.0, fn: fromWeather },
   { id: 'brave',    label: 'Brave',          weight: 1.4, fn: fromBrave },
+  { id: 'tavily',   label: 'Tavily',         weight: 1.4, fn: fromTavily },
   { id: 'searxng',  label: 'SearXNG',        weight: 1.4, fn: fromSearxng },
+  { id: 'notion',   label: '내 노션',        weight: 1.5, fn: fromNotion },
   { id: 'ddg',      label: 'DuckDuckGo',     weight: 0.9, fn: fromDuckDuckGo },
   { id: 'wiki',     label: 'Wikipedia',      weight: 1.1, fn: fromWikipedia },
   { id: 'hn',       label: 'Hacker News',    weight: 0.8, fn: fromHackerNews },
@@ -913,6 +1002,8 @@ async function handleSearch(request, env, ctx, origin) {
   // 브라우저가 보낸 개인 키·설정 (저장하지 않고 이 요청에만 씁니다)
   const opts = {
     braveKey:     (request.headers.get('X-Brave-Key') || '').trim(),
+    tavilyKey:    (request.headers.get('X-Tavily-Key') || '').trim(),
+    notionToken:  (request.headers.get('X-Notion-Token') || '').trim(),
     stackexKey:   (request.headers.get('X-Stackex-Key') || '').trim(),
     openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
     searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
@@ -929,19 +1020,24 @@ async function handleSearch(request, env, ctx, origin) {
   // Brave가 이번 요청에 실제로 포함될 때만 할당량을 봅니다.
   // 화면이 소스별로 따로 요청하기 때문에, 이 조건이 없으면
   // GitHub만 검색해도 Brave 횟수가 깎입니다.
-  const wantsBrave = active.some(function (s) { return s.id === 'brave'; });
+  const wantsBrave = active.some(function (s) { return s.id === 'brave' || s.id === 'tavily'; });
   let gate = { ok: false, mode: 'skip', left: null, limit: null };
   if (wantsBrave) {
     // 아직 세지는 않습니다. 캐시에서 답이 나오면 깎지 않기 위해서입니다.
     gate = await checkQuota(env, request, opts, false);
     opts.allowedBraveKey = gate.ok ? gate.key : '';
     opts.braveReason = gate.ok ? '' : (gate.reason || '무료분을 다 쓰셨습니다');
+    // Tavily 도 같은 무료 한도를 씁니다. 자기 키를 넣으면 제한이 없습니다.
+    opts.allowedTavilyKey = opts.tavilyKey || (gate.ok ? (env.TAVILY_KEY || '') : '');
+    opts.tavilyReason = opts.allowedTavilyKey ? '' : (gate.reason || 'Tavily 키를 입력하면 검색됩니다');
   }
 
   const cacheUrl = new URL(src.origin + '/cache/fusion');
   cacheUrl.searchParams.set('q', q);
   cacheUrl.searchParams.set('s', active.map(function (s) { return s.id; }).join(','));
   cacheUrl.searchParams.set('bk', opts.allowedBraveKey ? '1' : '0');
+  // 노션 결과는 사람마다 다릅니다. 토큰이 있으면 캐시를 아예 쓰지 않습니다.
+  if (opts.notionToken) cacheUrl.searchParams.set('nt', await sha8(opts.notionToken));
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
@@ -958,6 +1054,8 @@ async function handleSearch(request, env, ctx, origin) {
     gate = await checkQuota(env, request, opts, true);
     opts.allowedBraveKey = gate.ok ? gate.key : '';
     opts.braveReason = gate.ok ? '' : (gate.reason || '무료분을 다 쓰셨습니다');
+    opts.allowedTavilyKey = opts.tavilyKey || (gate.ok ? (env.TAVILY_KEY || '') : '');
+    opts.tavilyReason = opts.allowedTavilyKey ? '' : (gate.reason || 'Tavily 키를 입력하면 검색됩니다');
   }
 
   const started = Date.now();
@@ -1033,6 +1131,7 @@ export default {
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
       kv: Boolean(env.PODOGUM_KV),
+      tavily_key_server: Boolean(env.TAVILY_KEY),
       free_per_day: parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10),
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
         searxng: Boolean(env.SEARXNG_URL)
