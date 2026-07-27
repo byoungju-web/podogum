@@ -66,7 +66,7 @@ function sleep(ms) {
 
 async function grab(url, options) {
   const opts = options || {};
-  const tries = opts.retries === undefined ? 2 : opts.retries;
+  const tries = opts.retries === undefined ? 1 : opts.retries;
   let lastErr = null;
 
   for (let attempt = 0; attempt <= tries; attempt++) {
@@ -77,9 +77,12 @@ async function grab(url, options) {
         signal: AbortSignal.timeout(SOURCE_TIMEOUT)
       });
     } catch (e) {
-      lastErr = new Error(e.name === 'TimeoutError' ? '시간 초과' : '연결 실패');
-      if (attempt === tries) throw lastErr;
-      await sleep(400 * (attempt + 1));
+      const timedOut = e.name === 'TimeoutError';
+      lastErr = new Error(timedOut ? '시간 초과' : '연결 실패');
+      // 제한시간을 넘긴 소스는 다시 물어봐도 똑같이 느립니다.
+      // 재시도하면 4.5초짜리가 세 번 쌓여 전체가 15초가 됩니다. 바로 포기합니다.
+      if (timedOut || attempt === tries) throw lastErr;
+      await sleep(300);
       continue;
     }
 
