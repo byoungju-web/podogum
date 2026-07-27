@@ -8,6 +8,8 @@
  *   BRAVE_API_KEY  (Secret, 선택)  없으면 Brave만 건너뜁니다
  *   SEARXNG_URL    (Plain,  선택)  예: https://searx.example.org
  *                  JSON 출력이 켜진 인스턴스여야 합니다
+ *   OPENALEX_MAIL  (Plain,  권장)  wrangler.toml [vars] 에 넣으세요.
+ *                  대시보드에 직접 넣으면 재배포 때마다 지워집니다.
  */
 
 const ALLOWED_ORIGINS = [
@@ -22,7 +24,7 @@ const ALLOWED_ORIGINS = [
 
 const CACHE_TTL = 1800;        // 30분
 const SOURCE_TIMEOUT = 4500;   // 소스별 4.5초
-const UA = 'podogum/2.0 (+https://podolang.kr)';
+const UA = 'podogum/2.0 (+https://podogum.kr)';
 const RRF_K = 60;
 
 const FREE_PER_DAY_DEFAULT   = 3;    // 방문자 1인당 하루 무료 Brave 검색
@@ -493,7 +495,7 @@ async function fromStackOverflow(q, env, opts) {
 }
 
 async function fromArxiv(q) {
-  const u = new URL('http://export.arxiv.org/api/query');
+  const u = new URL('https://export.arxiv.org/api/query');
   u.searchParams.set('search_query', 'all:' + q);
   u.searchParams.set('start', '0');
   u.searchParams.set('max_results', '6');
@@ -526,10 +528,17 @@ async function fromOpenAlex(q, env, opts) {
   const u = new URL('https://api.openalex.org/works');
   u.searchParams.set('search', q);
   u.searchParams.set('per-page', '6');
-  // 실제로 받는 메일 주소를 OPENALEX_MAIL에 넣으면 여유 있는 대역으로 처리됩니다
+  // OpenAlex 는 연락처가 없는 요청을 공용 대역으로 묶습니다. Worker 는 세계 각지의
+  // 공유 IP에서 나가기 때문에 그 대역이 남들 요청으로 이미 차 있고, 그래서 429 가
+  // 났습니다. 메일을 넣으면 polite pool 로 옮겨져 사실상 막히지 않습니다.
+  // 쿼리와 User-Agent 양쪽에 넣는 것이 OpenAlex 가 안내하는 방식입니다.
   const mail = (opts && opts.openalexMail) || (env && env.OPENALEX_MAIL);
-  if (mail) u.searchParams.set('mailto', mail);
-  const data = await grab(u.toString());
+  const headers = {};
+  if (mail) {
+    u.searchParams.set('mailto', mail);
+    headers['User-Agent'] = 'podogum/2.0 (+https://podogum.kr; mailto:' + mail + ')';
+  }
+  const data = await grab(u.toString(), { retries: 0, headers: headers });
   return (data.results || []).map(function (x) {
     return {
       title: strip(x.display_name, 130),
@@ -1136,6 +1145,7 @@ export default {
       tavily_key_server: Boolean(env.TAVILY_KEY),
       free_per_day: parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10),
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
+        openalex_mail: Boolean(env.OPENALEX_MAIL),
         searxng: Boolean(env.SEARXNG_URL)
       }, 200, origin);
     }
