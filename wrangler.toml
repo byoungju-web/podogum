@@ -10,3 +10,5 @@ mode = "smart"
 [[kv_namespaces]]
 binding = "PODOGUM_KV"
 id = "80c98ea6e83d4eca84cd17bb9e189cc9"
+[vars]
+OPENALEX_MAIL = "hasin7jk@gmail.com"
