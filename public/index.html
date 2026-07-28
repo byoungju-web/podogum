@@ -297,6 +297,15 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var SNIP_FIELDS  = ['desc','description','summary','content','text','body','memo','내용','설명','address','주소','price','가격'];
   var RRF_K = 60;
 
+  // 등급(tier)은 worker 가 계산해서 결과에 실어 보냅니다. 이 파일에는 SOLO_TIER
+  // 표가 없습니다. 예전에는 양쪽에 같은 표가 있었는데, 한쪽만 고치면 같은 검색이
+  // 서로 다른 순서로 보이는 버그가 되는 자리였습니다.
+  //
+  // 로컬 결과(내 포도)만 예외입니다. worker 는 그 존재를 모르니 등급을 여기서
+  // 정합니다. 내 데이터라 어디서도 못 찾지만, 낱말 포함 여부로만 걸러낸 거친
+  // 결과라 웹에서 여러 곳이 동의한 문서보다 앞세우지는 않습니다.
+  var LOCAL_TIER = 2;
+
   /* ================= DOM 헬퍼 (innerHTML 미사용) ================= */
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -480,6 +489,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     } catch (e) { return String(raw).trim(); }
   }
 
+  // 원격 소스는 adoptFused 가 맡습니다. 이 함수는 이제 로컬(내 포도) 전용입니다.
   function ingest(sourceId, items) {
     bySource[sourceId] = items;
     items.forEach(function (it) {
@@ -491,8 +501,8 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
         docs.set(key, doc);
         order.push(key);
       }
-      // worker가 이미 weight/(K+rank)로 계산해 보낸 점수를 그대로 합산 = RRF
       doc.score += (typeof it.score === 'number' ? it.score : 1 / RRF_K);
+      if (!doc.tier || doc.tier < LOCAL_TIER) doc.tier = LOCAL_TIER;
       if (doc.sources.indexOf(sourceId) === -1) doc.sources.push(sourceId);
       if (!doc.snippet && it.snippet) doc.snippet = it.snippet;
       if (!doc.extra && it.extra) doc.extra = it.extra;
@@ -515,6 +525,9 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
         order.push(key);
       }
       doc.score += r.score || 0;
+      // worker 가 정한 등급을 그대로 받습니다. 로컬 결과와 URL 이 겹치면
+      // 높은 쪽을 남깁니다.
+      if ((r.tier || 0) > (doc.tier || 0)) doc.tier = r.tier;
       (r.sources || []).forEach(function (s) {
         if (doc.sources.indexOf(s) === -1) doc.sources.push(s);
       });
@@ -523,24 +536,12 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     });
   }
 
-  // worker.js 의 SOLO_TIER 와 같은 값이어야 합니다.
-  // 겹칠 수 없는 소스(취약점·날씨·제품)는 영원히 "1곳 일치" 라서, 개수 우선
-  // 정렬에서는 늘 맨 아래로 갑니다. 순위만 끌어올리고 배지는 실제 개수를 씁니다.
-  var SOLO_TIER = { weather: 3, product: 2, osv: 2 };
-
-  function tierOf(doc) {
-    var t = doc.sources.length;
-    for (var i = 0; i < doc.sources.length; i++) {
-      var lift = SOLO_TIER[doc.sources[i]];
-      if (lift && lift > t) t = lift;
-    }
-    return t;
-  }
-
   function fusedList() {
     var list = order.map(function (k) { return docs.get(k); });
     list.sort(function (a, b) {
-      var ta = tierOf(a), tb = tierOf(b);
+      // 오래된 캐시 응답에는 tier 가 없을 수 있어 소스 개수로 대신합니다.
+      var ta = a.tier || a.sources.length;
+      var tb = b.tier || b.sources.length;
       if (ta !== tb) return tb - ta;
       return b.score - a.score;
     });
