@@ -52,13 +52,61 @@ function json(data, status, origin) {
   return new Response(JSON.stringify(data), { status: status, headers: headers });
 }
 
+/* HTML 숫자 실체참조. 이름 있는 것만 풀면 &#x27; 가 화면에 그대로 남습니다.
+   위키백과 발췌에서 "&#x27;베네치아&#x27;라는" 처럼 보이던 원인입니다. */
+function unent(s) {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]{1,6});/g, function (m, h) {
+      const n = parseInt(h, 16);
+      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' ';
+    })
+    .replace(/&#(\d{1,7});/g, function (m, d) {
+      const n = parseInt(d, 10);
+      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' ';
+    })
+    .replace(/&amp;/g, '&');   // 마지막이어야 합니다
+}
+
+/* 발췌에는 본문이 아닌 것들이 섞여 옵니다.
+   네이버 블로그는 페이지에 박아둔 JSON 이 그대로 딸려오고,
+   표가 있는 페이지는 칸 구분 막대가, 나무위키는 "Read more" 가 붙습니다.
+   눈에 거슬리는 것만 골라 털어냅니다. 본문은 건드리지 않습니다. */
+function scrub(s) {
+  /* 1. JSON 조각. 여기서부터 끝까지는 본문이 아닙니다.
+     키가 둘 이상 이어지는 덩어리만 봅니다. 그냥 {"a": 1} 이 본문에 나오는
+     경우(스택오버플로 제목 등)까지 자르면 멀쩡한 글을 버립니다. */
+  const j = s.search(/\[?\s*\{\s*"[^"]{1,60}"\s*:\s*("[^"]*"|\d+|null|true|false)\s*,\s*"/);
+  if (j === 0) return '';
+  if (j > 0) s = s.slice(0, j);
+
+  // 2. 표 구분선과 칸 막대
+  s = s.replace(/\|\s*[-=:]{2,}\s*/g, ' ')
+       .replace(/\|{2,}/g, ' ')
+       .replace(/\s*\|\s*/g, ' · ')
+       .replace(/[-=_~]{4,}/g, ' ');
+
+  // 3. 공백 정리 후 앞뒤에 남은 구분자 떼기
+  s = s.replace(/\s+/g, ' ').trim();
+  s = s.replace(/^[·,;:\s]+/, '').replace(/[·,;:\s]*[[{(]?\s*$/, '');
+
+  // 4. 더보기 꼬리말
+  s = s.replace(/(\.{2,}|…)?\s*(read\s*more|더\s*보기|자세히\s*보기|continue\s*reading)\s*$/i, '');
+
+  // 길이로 버리지 않습니다. 이 함수는 제목에도 쓰여서
+  // "vue", "npm" 같은 짧은 제목이 통째로 사라집니다.
+  return s.replace(/(·\s*){2,}/g, '· ').trim();
+}
+
 function strip(text, limit) {
   if (!text) return '';
-  let s = String(text).replace(/<[^>]*>/g, '');
-  s = s.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-       .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
-  s = s.replace(/\s+/g, ' ').trim();
+  let s = String(text).replace(/<[^>]*>/g, ' ');
+  s = unent(s);
+  s = scrub(s);
   return s.length > limit ? s.slice(0, limit) + '…' : s;
 }
 
@@ -1517,7 +1565,7 @@ export default {
         service: 'podogum',
         // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
         // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.5-locale',
+        version: '2.6-clean',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
