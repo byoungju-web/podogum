@@ -1289,7 +1289,9 @@ export default {
     if (url.pathname === '/' || url.pathname === '/api/health') {
       return json({
         service: 'podogum',
-        version: '2.0-fusion',
+        // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
+        // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
+        version: '2.1-tier',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
