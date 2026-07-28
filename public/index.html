@@ -188,7 +188,6 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
 
           <div class="sublabel">언어</div>
           <div class="chips" id="langchips"></div>
-          <select id="lang"></select>
           <p class="hint">화면 글자와 <b>검색 결과 언어</b>가 함께 바뀝니다. 자동이면 국가에 맞춰 따라옵니다. 스페인에 있어도 한국어로 보고 싶으면 여기서 고정하세요.</p>
           <p class="hint" id="lang-note"></p>
         </div>
@@ -446,8 +445,10 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var LANG_NAME = {};
   LANGS.forEach(function (L) { LANG_NAME[L[0]] = L[1]; });
 
-  // 칩으로 바로 보여줄 언어. 나머지는 아래 목록에서 고릅니다.
-  var CHIPS = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'th', 'vi'];
+  /* 언어는 칩 하나로만 고릅니다. 예전에는 칩과 목록이 따로 있어서
+     같은 언어가 두 곳에 나왔습니다. 칸이 둘이면 어느 쪽이 실제인지
+     헷갈립니다. 자주 쓰는 것부터 앞에 둡니다. */
+  var CHIPS = ['auto'].concat(LANGS.map(function (L) { return L[0]; }));
 
   var COUNTRIES = [
     ['KR','대한민국'], ['US','United States'], ['JP','日本'], ['CN','中国'],
@@ -1225,8 +1226,8 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   }
 
   function initLang() {
-    var selL = $('lang'), selC = $('country'), chips = $('langchips');
-    if (!selL || !selC) return;
+    var selC = $('country'), chips = $('langchips');
+    if (!selC) return;
 
     // 국가 목록
     function fillCountry() {
@@ -1240,20 +1241,6 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
         selC.appendChild(x);
       });
       selC.value = ctryPref();
-    }
-
-    // 전체 언어 목록
-    function fillLang() {
-      clear(selL);
-      var o = el('option', null, t('auto') + ' · ' + (LANG_NAME[langCode()] || langCode()));
-      o.value = 'auto';
-      selL.appendChild(o);
-      LANGS.forEach(function (L) {
-        var x = el('option', null, L[1]);
-        x.value = L[0];
-        selL.appendChild(x);
-      });
-      selL.value = langPref();
     }
 
     // 자주 쓰는 언어 칩
@@ -1275,14 +1262,9 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       writeLS(LS_CTRY, selC.value);
       applyLang();
     });
-    selL.addEventListener('change', function () {
-      writeLS(LS_LANG, selL.value);
-      applyLang();
-    });
-
     // applyLang 이 다시 부를 수 있게 밖으로 걸어둡니다.
     repaintLang = function () {
-      fillCountry(); fillLang(); fillChips();
+      fillCountry(); fillChips();
       var note = $('lang-note');
       if (note) {
         note.textContent = T[langCode()]
