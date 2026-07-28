@@ -39,7 +39,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -670,6 +670,156 @@ async function fromOsv(q) {
   return all.slice(0, 8).map(shapeVuln);
 }
 
+/* =======================================================
+   국내여행 (한국관광공사 TourAPI, 공공데이터포털)
+
+   "제주도 맛집" 에 웹 검색은 블로그 글과 매체 기사를 줍니다. 이 소스는
+   실제 상호·주소·전화번호를 줍니다. 성격이 아예 달라서 융합에 새 축이 생깁니다.
+   재사용을 전제로 공개된 공공데이터라 약관 부담도 없습니다.
+
+   한 가지 함정이 설계를 정합니다. searchKeyword 는 검색어를 제목에 대고
+   맞춰봅니다. "제주도 맛집" 을 그대로 던지면 이름에 "맛집" 이 든 가게만
+   나오니 거의 빈손입니다. 그래서 질문을 둘로 쪼갭니다.
+     지역 이름  → areaCode      (제주도 → 39)
+     의도 낱말  → contentTypeId (맛집 → 39 음식점)
+   지역을 못 찾으면 그때만 제목 검색으로 물러납니다.
+   ======================================================= */
+
+// 시도 단위 areaCode. 흔히 쓰는 줄임말과 정식명을 함께 받습니다.
+const TOUR_AREA = {
+  '서울특별시': 1, '서울시': 1, '서울': 1,
+  '인천광역시': 2, '인천시': 2, '인천': 2,
+  '대전광역시': 3, '대전시': 3, '대전': 3,
+  '대구광역시': 4, '대구시': 4, '대구': 4,
+  '광주광역시': 5, '광주시': 5, '광주': 5,
+  '부산광역시': 6, '부산시': 6, '부산': 6,
+  '울산광역시': 7, '울산시': 7, '울산': 7,
+  '세종특별자치시': 8, '세종시': 8, '세종': 8,
+  '경기도': 31, '경기': 31,
+  '강원특별자치도': 32, '강원도': 32, '강원': 32,
+  '충청북도': 33, '충북': 33,
+  '충청남도': 34, '충남': 34,
+  '경상북도': 35, '경북': 35,
+  '경상남도': 36, '경남': 36,
+  '전북특별자치도': 37, '전라북도': 37, '전북': 37,
+  '전라남도': 38, '전남': 38,
+  '제주특별자치도': 39, '제주도': 39, '제주': 39
+};
+
+// 좁은 것부터 봅니다. "맛집" 이 "여행" 보다 먼저 걸려야 합니다.
+const TOUR_TYPE = [
+  { id: 39, re: /(맛집|음식|식당|먹거리|먹을|먹방|카페|디저트|횟집|고깃집|분식|술집)/ },
+  { id: 32, re: /(숙소|숙박|호텔|펜션|리조트|게스트하우스|민박|모텔|한옥스테이|캠핑장)/ },
+  { id: 15, re: /(축제|행사|공연|페스티벌|이벤트)/ },
+  { id: 14, re: /(박물관|미술관|전시|문화시설|공연장|기념관)/ },
+  { id: 28, re: /(레포츠|등산|캠핑|낚시|스키|서핑|자전거|골프|물놀이|체험)/ },
+  { id: 38, re: /(쇼핑|시장|백화점|아웃렛|기념품|특산품)/ },
+  { id: 12, re: /(관광|명소|가볼만한|가볼만|가볼|볼거리|여행지|여행|놀거리|데이트|코스|야경|드라이브|해수욕장|산책|나들이)/ }
+];
+
+const TOUR_LABEL = {
+  12: '관광지', 14: '문화시설', 15: '행사·축제', 25: '여행코스',
+  28: '레포츠', 32: '숙박', 38: '쇼핑', 39: '음식점'
+};
+
+/* 공공데이터포털은 인증키를 두 벌로 줍니다. Encoding 키는 이미 %2B 같은
+   형태라 다시 인코딩하면 인증이 깨집니다. Decoding 키는 인코딩해야 합니다.
+   어느 쪽을 붙여넣어도 되게 % 이스케이프가 있는지 보고 판단합니다. */
+function tourKeyParam(key) {
+  return /%[0-9A-Fa-f]{2}/.test(key) ? key : encodeURIComponent(key);
+}
+
+async function tourCall(path, params, key) {
+  const qs = Object.keys(params).map(function (k) {
+    return k + '=' + encodeURIComponent(params[k]);
+  }).join('&');
+  const url = 'https://apis.data.go.kr/B551011/KorService1/' + path
+            + '?serviceKey=' + tourKeyParam(key) + '&' + qs;
+  const data = await grab(url, { retries: 0, timeout: 4000 });
+
+  const body = ((data || {}).response || {}).body || {};
+  // 결과가 없으면 items 가 객체가 아니라 빈 문자열로 옵니다. 옛 공공API 특유입니다.
+  const item = (body.items || {}).item;
+  if (!item) return [];
+  return Array.isArray(item) ? item : [item];
+}
+
+function shapeTour(x) {
+  const name = strip(x.title, 130);
+  if (!name) return null;
+
+  const addr = strip((x.addr1 || '') + ' ' + (x.addr2 || ''), 200);
+  const bits = [];
+  const kind = TOUR_LABEL[String(x.contenttypeid)] || TOUR_LABEL[x.contenttypeid];
+  if (kind) bits.push(kind);
+  if (x.tel) bits.push(strip(x.tel, 40));
+  bits.push('한국관광공사');
+
+  return {
+    title: name,
+    // TourAPI 는 공개 상세 페이지 주소를 주지 않습니다. 이름과 주소로 지도를
+    // 열어주는 편이 실제로 찾아가는 데 쓸모가 있습니다.
+    url: 'https://map.naver.com/p/search/' + encodeURIComponent(name + ' ' + (x.addr1 || '')),
+    snippet: addr,
+    extra: bits.join(' · ')
+  };
+}
+
+async function fromTour(q, env, opts) {
+  const key = (opts && opts.tourKey) || (env && env.TOUR_KEY);
+  if (!key) throw new Error('관광공사 키 없음');
+  if (!/[가-힣]/.test(q)) throw new Error('국내여행 질문 아님');
+
+  let typeId = 0;
+  for (let i = 0; i < TOUR_TYPE.length && !typeId; i++) {
+    if (TOUR_TYPE[i].re.test(q)) typeId = TOUR_TYPE[i].id;
+  }
+  if (!typeId) throw new Error('국내여행 질문 아님');
+
+  // 지역 이름은 긴 것부터 맞춰봅니다. "전북" 이 "전북특별자치도" 를 가리지 않게.
+  const names = Object.keys(TOUR_AREA).sort(function (a, b) { return b.length - a.length; });
+  let areaCode = 0, areaName = '';
+  for (let i = 0; i < names.length && !areaCode; i++) {
+    if (q.indexOf(names[i]) !== -1) { areaCode = TOUR_AREA[names[i]]; areaName = names[i]; }
+  }
+
+  const common = {
+    MobileOS: 'ETC',
+    MobileApp: 'podogum',
+    _type: 'json',
+    numOfRows: '8',
+    pageNo: '1'
+  };
+
+  let items;
+  if (areaCode) {
+    // arrange=O 는 대표사진이 등록된 곳을 앞세웁니다. 알려진 장소일 확률이 높습니다.
+    items = await tourCall('areaBasedList1', Object.assign({}, common, {
+      areaCode: String(areaCode),
+      contentTypeId: String(typeId),
+      arrange: 'O'
+    }), key);
+  } else {
+    // 지역을 못 찾았습니다. 남은 낱말로 제목 검색을 해봅니다.
+    let kw = q;
+    TOUR_TYPE.forEach(function (t) { kw = kw.replace(t.re, ' '); });
+    kw = kw.replace(/(알려줘|알려|추천|해줘|어디|좋은|괜찮은|유명한|곳|데|장소|리스트|베스트|best|top)/gi, ' ')
+           .replace(/\s+/g, ' ').trim();
+    if (kw.length < 2) throw new Error('지역을 못 찾음');
+    items = await tourCall('searchKeyword1', Object.assign({}, common, {
+      keyword: kw,
+      contentTypeId: String(typeId),
+      arrange: 'O'
+    }), key);
+  }
+
+  const out = items.map(shapeTour).filter(Boolean);
+  if (!out.length) {
+    throw new Error((areaName || '해당 지역') + ' ' + (TOUR_LABEL[typeId] || '') + ' 없음');
+  }
+  return out;
+}
+
 /* -------- 날씨 (Open-Meteo, 키 없음) --------
    검색어에 날씨 낱말과 지명이 같이 있을 때만 켜집니다.
    "부산에 비가 오냐" 같은 질문에 문서가 아니라 실제 예보로 답하기 위한 소스입니다. */
@@ -1052,6 +1202,8 @@ const SOURCES = [
   { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages },
   // 좁게 켜지지만 켜지면 다른 데서 못 얻는 답입니다. 그래서 가중치를 높게 둡니다.
   { id: 'osv',      label: '취약점',         weight: 1.6, fn: fromOsv },
+  // 국내 장소는 웹 문서와 겹치지 않지만, 한국어 여행 질문에서는 이게 답입니다.
+  { id: 'tour',     label: '국내여행',       weight: 1.5, fn: fromTour },
   { id: 'product',  label: '제품',           weight: 1.8, fn: fromProduct }
 ];
 
@@ -1089,7 +1241,7 @@ function normalizeUrl(raw) {
    여러 소스의 합산을 구조적으로 못 넘습니다. 그래서 개수 자체를 올려줍니다.
    화면의 "N곳 일치" 배지는 실제 개수를 그대로 씁니다. 순위만 조정하고
    표시는 사실대로 둡니다. */
-const SOLO_TIER = { weather: 3, product: 2, osv: 2 };
+const SOLO_TIER = { weather: 3, product: 2, osv: 2, tour: 2 };
 
 function tierOf(doc) {
   let t = doc.sources.length;
@@ -1175,6 +1327,7 @@ async function handleSearch(request, env, ctx, origin) {
     stackexKey:   (request.headers.get('X-Stackex-Key') || '').trim(),
     openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
     searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
+    tourKey:      (request.headers.get('X-Tour-Key') || '').trim(),
     passKey:      (request.headers.get('X-Pass-Key') || '').trim(),
     visitorId:    (request.headers.get('X-Visitor-Id') || '').trim()
   };
@@ -1207,6 +1360,7 @@ async function handleSearch(request, env, ctx, origin) {
   // 노션 결과는 사람마다 다릅니다. 토큰이 있으면 캐시를 아예 쓰지 않습니다.
   if (opts.notionToken) cacheUrl.searchParams.set('nt', await sha8(opts.notionToken));
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
+  cacheUrl.searchParams.set('tr', (opts.tourKey || env.TOUR_KEY) ? '1' : '0');
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
   const hit = await cache.match(cacheKey);
@@ -1296,7 +1450,7 @@ export default {
         service: 'podogum',
         // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
         // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.2-place',
+        version: '2.3-tour',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
@@ -1305,6 +1459,7 @@ export default {
       free_per_day: parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10),
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
         openalex_mail: Boolean(env.OPENALEX_MAIL),
+        tour_key_server: Boolean(env.TOUR_KEY),
         searxng: Boolean(env.SEARXNG_URL)
       }, 200, origin);
     }
