@@ -690,11 +690,27 @@ const WMO = {
   95: '뇌우', 96: '우박 동반 뇌우', 99: '강한 우박 뇌우'
 };
 
+/* "부산 날씨" 는 공백으로 잘라 "부산" 을 얻습니다. 그런데 한국에서는
+   "부산날씨" 처럼 붙여 쓰는 쪽이 더 흔하고, 그러면 후보가 "부산날씨" 하나뿐이라
+   지오코더가 그런 지명을 못 찾고 날씨 칸이 통째로 꺼졌습니다.
+   그래서 낱말 안쪽의 날씨 관련 글자를 떼어낸 나머지도 후보에 넣습니다.
+   떼어낸 쪽을 먼저 시도합니다. 그게 지명일 확률이 높습니다. */
+const WEATHER_WORD = /(날씨|기온|온도|예보|우산|습도|바람|강수|더위|추위|weather|forecast|어때|어떄|어떻게|어떤지|알려줘|알려|궁금|입니까|인가요|이야|이니)/gi;
+
 function placeCandidates(q) {
-  return q.split(/\s+/)
-    .map(function (t) { return t.replace(/[?!.,~]/g, '').replace(JOSA, ''); })
-    .filter(function (t) { return t.length >= 2 && !STOPWORD.test(t) && !/^\d+$/.test(t); })
-    .slice(0, 4);
+  const out = [];
+  function push(t) {
+    t = String(t).replace(JOSA, '').trim();
+    if (t.length < 2 || STOPWORD.test(t) || /^\d+$/.test(t)) return;
+    if (out.indexOf(t) === -1) out.push(t);
+  }
+  q.split(/\s+/).forEach(function (raw) {
+    const t = raw.replace(/[?!.,~]/g, '').replace(JOSA, '');
+    const stripped = t.replace(WEATHER_WORD, '');
+    if (stripped !== t) push(stripped);   // "부산날씨" → "부산"
+    push(t);
+  });
+  return out.slice(0, 5);
 }
 
 async function geocode(name) {
@@ -1056,6 +1072,29 @@ function normalizeUrl(raw) {
   }
 }
 
+/* 겹칠 수 없는 소스.
+
+   osv.dev, Open-Meteo, Open Food Facts 는 각자 고유한 주소 체계를 씁니다.
+   웹 검색 결과와 URL 이 일치할 일이 절대 없어서 영원히 "1곳 일치" 입니다.
+   그런데 정렬이 소스 개수를 점수보다 먼저 보기 때문에, 2곳 이상 겹친 문서가
+   전부 올라간 뒤에야 나옵니다. "lodash 안전한가" 를 알고 싶어 검색한 사람에게
+   CVE 가 20위에 있으면 못 찾습니다.
+
+   가중치를 올려도 해결되지 않습니다. 단독 소스의 최대 점수는 weight/60 이라
+   여러 소스의 합산을 구조적으로 못 넘습니다. 그래서 개수 자체를 올려줍니다.
+   화면의 "N곳 일치" 배지는 실제 개수를 그대로 씁니다. 순위만 조정하고
+   표시는 사실대로 둡니다. */
+const SOLO_TIER = { weather: 3, product: 2, osv: 2 };
+
+function tierOf(doc) {
+  let t = doc.sources.length;
+  for (let i = 0; i < doc.sources.length; i++) {
+    const lift = SOLO_TIER[doc.sources[i]];
+    if (lift && lift > t) t = lift;
+  }
+  return t;
+}
+
 /**
  * RRF: score(doc) = Σ  weight_s / (K + rank_s)
  * 여러 소스가 같은 문서를 올릴수록 점수가 합산됩니다.
@@ -1100,8 +1139,10 @@ function fuse(perSource) {
   });
 
   list.sort(function (a, b) {
-    // 여러 소스가 동시에 올린 문서를 먼저 (RRF의 핵심)
-    if (a.sources.length !== b.sources.length) return b.sources.length - a.sources.length;
+    // 여러 소스가 동시에 올린 문서를 먼저 (RRF의 핵심).
+    // 단독 소스는 SOLO_TIER 로 끌어올려 같은 줄에서 겨루게 합니다.
+    const ta = tierOf(a), tb = tierOf(b);
+    if (ta !== tb) return tb - ta;
     return b.score - a.score;
   });
   return list;
