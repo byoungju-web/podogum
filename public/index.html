@@ -693,6 +693,10 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   function run() {
     var query = input.value.trim();
     if (!query || running) return;
+    // 설정 패널은 탭과 결과 사이에 있습니다. 열린 채로 검색하면 결과를
+    // 화면 밖으로 밀어내서 "결과가 안 나온다" 처럼 보입니다.
+    var pn = document.getElementById('panel');
+    if (pn) pn.classList.remove('open');
     running = true;
     goBtn.disabled = true;
     docs = new Map();
