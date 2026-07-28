@@ -445,10 +445,23 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var LANG_NAME = {};
   LANGS.forEach(function (L) { LANG_NAME[L[0]] = L[1]; });
 
-  /* 언어는 칩 하나로만 고릅니다. 예전에는 칩과 목록이 따로 있어서
-     같은 언어가 두 곳에 나왔습니다. 칸이 둘이면 어느 쪽이 실제인지
-     헷갈립니다. 자주 쓰는 것부터 앞에 둡니다. */
-  var CHIPS = ['auto'].concat(LANGS.map(function (L) { return L[0]; }));
+  // 늘 보이는 언어. 40개를 다 늘어놓으면 고르기가 더 어렵습니다.
+  var CHIPS_BASE = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'fr', 'de'];
+
+  /* 여기에 두 가지를 더 붙입니다.
+     하나는 지금 있는 나라의 언어입니다. 태국에서 열면 ไทย 칩이 생겨서,
+     자동으로 두든 직접 고르든 그 나라 말로 볼 수 있습니다. 국가를 손으로
+     바꿔도 마찬가지라 50개국 어느 언어든 이 방법으로 닿습니다.
+     다른 하나는 이미 골라둔 언어입니다. 안 그러면 나라를 옮긴 순간
+     내가 고른 언어 칩이 사라져서 되돌릴 방법이 없어집니다. */
+  function chipList() {
+    var list = CHIPS_BASE.slice();
+    var here = COUNTRY_LANG[country()];
+    if (here && list.indexOf(here) === -1) list.push(here);
+    var cur = langPref();
+    if (cur !== 'auto' && list.indexOf(cur) === -1) list.push(cur);
+    return list;
+  }
 
   var COUNTRIES = [
     ['KR','대한민국'], ['US','United States'], ['JP','日本'], ['CN','中国'],
@@ -1246,7 +1259,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     // 자주 쓰는 언어 칩
     function fillChips() {
       clear(chips);
-      CHIPS.forEach(function (code) {
+      chipList().forEach(function (code) {
         var b = el('button', 'chip', code === 'auto' ? t('auto') : LANG_NAME[code]);
         b.type = 'button';
         b.setAttribute('aria-pressed', langPref() === code ? 'true' : 'false');
