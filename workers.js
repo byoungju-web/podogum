@@ -579,6 +579,97 @@ async function fromGithub(q) {
   });
 }
 
+/* =======================================================
+   취약점 (OSV, 구글 운영, 키 없음)
+
+   "이 라이브러리 지금 안전한가" 에 답할 수 있는 소스가 지금까지 하나도
+   없었습니다. Brave·Tavily·GitHub 를 다 합쳐도 블로그 글이 나올 뿐이고,
+   실제 취약점 목록은 OSV 에만 있습니다.
+
+   OSV 에는 전문 검색이 없습니다. 패키지 이름과 생태계만 받습니다.
+   그래서 검색어가 패키지 이름 그 자체일 때만 켜집니다.
+     lodash                       → 켜짐
+     github.com/gin-gonic/gin     → 켜짐
+     제주도 맛집                    → 꺼짐
+     attention mechanism          → 꺼짐 (낱말이 둘이라 패키지명이 아님)
+   ======================================================= */
+
+const OSV_ECOS = ['npm', 'PyPI', 'crates.io', 'Go', 'Maven'];
+const OSV_SEV = { CRITICAL: '치명적', HIGH: '높음', MODERATE: '보통', MEDIUM: '보통', LOW: '낮음' };
+
+function packageNameLike(q) {
+  const t = q.trim();
+  if (/\s/.test(t)) return false;                  // 낱말 하나여야 합니다
+  if (t.length < 2 || t.length > 80) return false;
+  if (!/^[A-Za-z@]/.test(t)) return false;         // 영문 또는 @scope 로 시작
+  return /^[A-Za-z0-9._@:/-]+$/.test(t);
+}
+
+async function osvQuery(name, eco) {
+  const data = await grab('https://api.osv.dev/v1/query', {
+    method: 'POST',
+    retries: 0,
+    timeout: 3000,
+    body: JSON.stringify({ package: { name: name, ecosystem: eco } })
+  });
+  return ((data && data.vulns) || []).map(function (v) {
+    if (!v.id) return null;
+    v._eco = eco;
+    return v;
+  }).filter(Boolean);
+}
+
+function shapeVuln(v) {
+  // CVE 번호가 사람들이 실제로 찾는 식별자입니다. OSV 자체 ID(GHSA-...)보다 먼저 보여줍니다.
+  const cve = (v.aliases || []).filter(function (a) { return /^CVE-/.test(a); })[0];
+  const sevRaw = ((v.database_specific || {}).severity || '').toUpperCase();
+
+  const bits = [];
+  if (OSV_SEV[sevRaw]) bits.push('심각도 ' + OSV_SEV[sevRaw]);
+  bits.push(v._eco);
+  if (cve) bits.push(cve);
+  const when = (v.modified || v.published || '').slice(0, 10);
+  if (when) bits.push('수정 ' + when);
+
+  const head = strip(v.summary || '', 130) || v.id;
+
+  return {
+    title: (cve ? cve + ' · ' : '') + head,
+    url: 'https://osv.dev/vulnerability/' + v.id,
+    snippet: strip(v.details || '', 200),
+    extra: bits.join(' · ')
+  };
+}
+
+async function fromOsv(q) {
+  const name = q.trim();
+  if (!packageNameLike(name)) throw new Error('패키지 이름 아님');
+
+  const settled = await Promise.allSettled(OSV_ECOS.map(function (eco) {
+    return osvQuery(name, eco);
+  }));
+
+  const seen = {};
+  const all = [];
+  settled.forEach(function (r) {
+    if (r.status !== 'fulfilled') return;
+    r.value.forEach(function (v) {
+      if (seen[v.id]) return;
+      seen[v.id] = 1;
+      all.push(v);
+    });
+  });
+
+  if (!all.length) throw new Error('알려진 취약점 없음');
+
+  // 최근에 고쳐진 것부터. 순서가 곧 RRF 랭크가 되니 아무 순서로 두면 안 됩니다.
+  all.sort(function (a, b) {
+    return String(b.modified || b.published || '').localeCompare(String(a.modified || a.published || ''));
+  });
+
+  return all.slice(0, 8).map(shapeVuln);
+}
+
 /* -------- 날씨 (Open-Meteo, 키 없음) --------
    검색어에 날씨 낱말과 지명이 같이 있을 때만 켜집니다.
    "부산에 비가 오냐" 같은 질문에 문서가 아니라 실제 예보로 답하기 위한 소스입니다. */
@@ -938,6 +1029,8 @@ const SOURCES = [
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
   { id: 'notion',   label: '내 노션',        weight: 1.5, fn: fromNotion },
   { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages },
+  // 좁게 켜지지만 켜지면 다른 데서 못 얻는 답입니다. 그래서 가중치를 높게 둡니다.
+  { id: 'osv',      label: '취약점',         weight: 1.6, fn: fromOsv },
   { id: 'product',  label: '제품',           weight: 1.8, fn: fromProduct }
 ];
 
