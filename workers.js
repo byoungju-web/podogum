@@ -39,7 +39,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id, X-Lang',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -261,6 +261,28 @@ async function handlePass(request, env, origin) {
 }
 
 /* =======================================================
+   언어
+
+   화면 언어와 검색 언어를 같이 움직입니다. 자동일 때는 Cloudflare 가 알려주는
+   접속 국가를 씁니다. 기기 언어보다 정확합니다. 여행 중이거나 외국에서 산
+   기기를 쓰는 경우가 흔하기 때문입니다.
+   ======================================================= */
+
+const LANG_BY_COUNTRY = { KR: 'ko', TH: 'th' };
+const LANG_CFG = {
+  ko: { brave: 'KR', wiki: ['ko', 'en'], off: 'kr' },
+  th: { brave: 'TH', wiki: ['th', 'en'], off: 'th' },
+  en: { brave: 'US', wiki: ['en'],       off: 'world' }
+};
+
+function pickLang(request, opts) {
+  const asked = (opts && opts.lang) || 'auto';
+  if (asked !== 'auto' && LANG_CFG[asked]) return asked;
+  const c = (request.headers.get('CF-IPCountry') || '').toUpperCase();
+  return LANG_BY_COUNTRY[c] || 'en';
+}
+
+/* =======================================================
    소스별 어댑터
    각 어댑터는 [{title, url, snippet, extra}] 를 반환합니다
    ======================================================= */
@@ -272,8 +294,9 @@ async function fromBrave(q, env, opts) {
   const u = new URL('https://api.search.brave.com/res/v1/web/search');
   u.searchParams.set('q', q);
   u.searchParams.set('count', '10');
-  u.searchParams.set('country', 'KR');
-  u.searchParams.set('search_lang', 'ko');
+  const cfg = LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko;
+  u.searchParams.set('country', cfg.brave);
+  u.searchParams.set('search_lang', (opts && opts.lang2) || 'ko');
   u.searchParams.set('safesearch', 'moderate');
   const data = await grab(u.toString(), {
     headers: { 'X-Subscription-Token': key, 'Accept-Encoding': 'gzip' }
@@ -373,7 +396,7 @@ async function fromSearxng(q, env, opts) {
   const u = new URL(base + '/search');
   u.searchParams.set('q', q);
   u.searchParams.set('format', 'json');
-  u.searchParams.set('language', 'ko');
+  u.searchParams.set('language', (opts && opts.lang2) || 'ko');
   const data = await grab(u.toString());
   return (data.results || []).slice(0, 12).map(function (x) {
     return { title: strip(x.title, 130), url: x.url, snippet: strip(x.content, 200) };
@@ -443,8 +466,9 @@ function shareWord(title, q) {
   return false;
 }
 
-async function fromWikipedia(q) {
-  const both = await Promise.allSettled([wikiLang(q, 'ko'), wikiLang(q, 'en')]);
+async function fromWikipedia(q, env, opts) {
+  const cfg = LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko;
+  const both = await Promise.allSettled(cfg.wiki.map(function (L) { return wikiLang(q, L); }));
   let out = [];
   both.forEach(function (r) {
     if (r.status !== 'fulfilled') return;
@@ -1155,7 +1179,7 @@ function shapeProduct(p) {
   };
 }
 
-async function fromProduct(q) {
+async function fromProduct(q, env, opts) {
   const t = q.trim();
 
   // 1. 바코드
@@ -1172,7 +1196,8 @@ async function fromProduct(q) {
   // 2. 성분·안전 관련 낱말이 있을 때만 제품명으로 검색
   if (!PRODUCT_HINT.test(t)) throw new Error('제품 질문 아님');
 
-  const u = new URL('https://kr.openfoodfacts.org/cgi/search.pl');
+  const host = (LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko).off;
+  const u = new URL('https://' + host + '.openfoodfacts.org/cgi/search.pl');
   u.searchParams.set('search_terms', t.replace(PRODUCT_HINT, '').trim() || t);
   u.searchParams.set('search_simple', '1');
   u.searchParams.set('action', 'process');
@@ -1328,9 +1353,14 @@ async function handleSearch(request, env, ctx, origin) {
     openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
     searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
     tourKey:      (request.headers.get('X-Tour-Key') || '').trim(),
+    lang:         (request.headers.get('X-Lang') || 'auto').trim(),
     passKey:      (request.headers.get('X-Pass-Key') || '').trim(),
     visitorId:    (request.headers.get('X-Visitor-Id') || '').trim()
   };
+
+  // lang2 는 실제로 쓸 언어입니다. 어댑터들이 이 값만 봅니다.
+  opts.lang2 = pickLang(request, opts);
+  const country = (request.headers.get('CF-IPCountry') || '').toUpperCase();
 
   const only = (src.searchParams.get('only') || '').split(',').filter(Boolean);
   const active = only.length
@@ -1361,12 +1391,16 @@ async function handleSearch(request, env, ctx, origin) {
   if (opts.notionToken) cacheUrl.searchParams.set('nt', await sha8(opts.notionToken));
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
   cacheUrl.searchParams.set('tr', (opts.tourKey || env.TOUR_KEY) ? '1' : '0');
+  // 언어가 다르면 결과도 다릅니다. 이게 없으면 한국어 결과가 태국 방문자에게 갑니다.
+  cacheUrl.searchParams.set('lg', opts.lang2);
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
   const hit = await cache.match(cacheKey);
   if (hit) {
     const body = await hit.json();
     body.cache = 'HIT';
+    body.country = country;
+    body.lang = opts.lang2;
     if (wantsBrave) body.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
     return json(body, 200, origin);
   }
@@ -1432,6 +1466,8 @@ async function handleSearch(request, env, ctx, origin) {
   ctx.waitUntil(cache.put(cacheKey, toCache));
 
   // 사람마다 다른 값이라 캐시에는 넣지 않습니다
+  payload.country = country;
+  payload.lang = opts.lang2;
   if (wantsBrave) payload.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
   return json(payload, 200, origin);
 }
@@ -1450,7 +1486,7 @@ export default {
         service: 'podogum',
         // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
         // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.3-tour',
+        version: '2.4-lang',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
@@ -1460,6 +1496,7 @@ export default {
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
         openalex_mail: Boolean(env.OPENALEX_MAIL),
         tour_key_server: Boolean(env.TOUR_KEY),
+        country: (request.headers.get('CF-IPCountry') || '').toUpperCase(),
         searxng: Boolean(env.SEARXNG_URL)
       }, 200, origin);
     }
