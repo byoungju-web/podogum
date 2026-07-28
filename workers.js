@@ -1135,14 +1135,17 @@ function fuse(perSource) {
   const list = Array.from(docs.values());
   list.forEach(function (d) {
     d.score = Math.round(d.score * 100000) / 100000;
+    // 등급을 응답에 실어 보냅니다. 이게 없으면 화면이 SOLO_TIER 표를 따로
+    // 들고 같은 계산을 반복해야 하고, 두 곳의 값이 어긋나는 순간
+    // 같은 검색이 서로 다른 순서로 보이는 버그가 됩니다.
+    d.tier = tierOf(d);
     delete d.bestRank;
   });
 
   list.sort(function (a, b) {
     // 여러 소스가 동시에 올린 문서를 먼저 (RRF의 핵심).
     // 단독 소스는 SOLO_TIER 로 끌어올려 같은 줄에서 겨루게 합니다.
-    const ta = tierOf(a), tb = tierOf(b);
-    if (ta !== tb) return tb - ta;
+    if (a.tier !== b.tier) return b.tier - a.tier;
     return b.score - a.score;
   });
   return list;
