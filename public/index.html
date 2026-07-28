@@ -523,10 +523,25 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     });
   }
 
+  // worker.js 의 SOLO_TIER 와 같은 값이어야 합니다.
+  // 겹칠 수 없는 소스(취약점·날씨·제품)는 영원히 "1곳 일치" 라서, 개수 우선
+  // 정렬에서는 늘 맨 아래로 갑니다. 순위만 끌어올리고 배지는 실제 개수를 씁니다.
+  var SOLO_TIER = { weather: 3, product: 2, osv: 2 };
+
+  function tierOf(doc) {
+    var t = doc.sources.length;
+    for (var i = 0; i < doc.sources.length; i++) {
+      var lift = SOLO_TIER[doc.sources[i]];
+      if (lift && lift > t) t = lift;
+    }
+    return t;
+  }
+
   function fusedList() {
     var list = order.map(function (k) { return docs.get(k); });
     list.sort(function (a, b) {
-      if (a.sources.length !== b.sources.length) return b.sources.length - a.sources.length;
+      var ta = tierOf(a), tb = tierOf(b);
+      if (ta !== tb) return tb - ta;
       return b.score - a.score;
     });
     return list;
