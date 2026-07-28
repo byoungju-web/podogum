@@ -721,7 +721,11 @@ async function geocode(name) {
   u.searchParams.set('format', 'json');
   const data = await grab(u.toString(), { retries: 0 });
   const hit = (data.results || [])[0];
-  return hit ? { name: hit.name, lat: hit.latitude, lon: hit.longitude, country: hit.country || '' } : null;
+  // asked = 사용자가 실제로 친 낱말. 지오코더는 language=ko 를 줘도 부산에
+  // "Pusan" 처럼 옛 로마자 표기를 돌려주는 경우가 있습니다. 화면에는
+  // 사용자가 친 그대로를 보여주는 편이 맞습니다.
+  return hit ? { name: hit.name, asked: name, lat: hit.latitude,
+                 lon: hit.longitude, country: hit.country || '' } : null;
 }
 
 async function fromWeather(q) {
@@ -750,7 +754,8 @@ async function fromWeather(q) {
   const hi = (day.temperature_2m_max || [])[0];
   const lo = (day.temperature_2m_min || [])[0];
 
-  const head = place.name + ' 지금 ' + Math.round(cur.temperature_2m) + '°C'
+  const shown = place.asked || place.name;
+  const head = shown + ' 지금 ' + Math.round(cur.temperature_2m) + '°C'
              + (sky ? ' · ' + sky : '')
              + (typeof pop === 'number' ? ' · 강수확률 ' + pop + '%' : '');
 
@@ -771,7 +776,7 @@ async function fromWeather(q) {
 
   return [{
     title: head,
-    url: 'https://search.naver.com/search.naver?query=' + encodeURIComponent(place.name + ' 날씨'),
+    url: 'https://search.naver.com/search.naver?query=' + encodeURIComponent(shown + ' 날씨'),
     snippet: lines.join(' · '),
     extra: '실시간 예보 · Open-Meteo'
   }];
@@ -1291,7 +1296,7 @@ export default {
         service: 'podogum',
         // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
         // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.1-tier',
+        version: '2.2-place',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
