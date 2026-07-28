@@ -9,21 +9,23 @@
 :root{
   --ink:#1B1524;
   --paper:#FAF9FB;
-  --grape:#5B2A86;
+  --grape:#4C1D95;
+  --grape2:#6D28D9;
   --vine:#6E8F3F;
   --wine:#A63A5E;
   --gold:#B8862B;
   --edge:#E2DEE8;
   --dim:#6B6478;
   --body:#453E52;
-  --visited:#8A7A9B;
+  --visited:#7C6E92;
   --sans:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-text-size-adjust:100%}
-button,input{font:inherit;color:inherit}
+button,input,select{font:inherit;color:inherit}
+input[type=checkbox],input[type=radio]{accent-color:var(--grape);width:19px;height:19px}
 :focus-visible{outline:2px solid var(--grape);outline-offset:2px}
 .wrap{max-width:760px;margin:0 auto;padding:0 16px 80px}
 
@@ -131,7 +133,11 @@ a.title:hover{color:var(--wine);text-decoration:underline}
 .kc-body input:focus{border-color:var(--grape);outline:none}
 .kc-body .hint{margin:0 0 8px}
 .kc-body select{width:100%;border:1px solid var(--edge);border-radius:8px;padding:10px 11px;font-size:15.5px;background:#fff;margin-bottom:8px}
-.kc-body select:focus{border-color:var(--grape);outline:none}
+".kc-body select:focus{border-color:var(--grape);outline:none}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.chip{border:1px solid var(--edge);background:#fff;border-radius:999px;padding:7px 14px;font-size:14.5px;cursor:pointer;white-space:nowrap}
+.chip[aria-pressed="true"]{background:var(--grape);color:#fff;border-color:var(--grape);font-weight:700}
+.sublabel{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.06em;margin:10px 0 6px}
 .kc-body .guide{margin:0;padding-left:20px;font-size:13.5px;color:var(--dim);line-height:1.8}
 .kc-body .guide li{margin-bottom:2px}
 
@@ -176,14 +182,15 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
           <span class="kc-st" id="st-lang">자동</span>
         </summary>
         <div class="kc-body">
-          <select id="lang">
-            <option value="auto">자동 · 접속 지역 따라</option>
-            <option value="ko">한국어</option>
-            <option value="en">English</option>
-            <option value="th">ไทย</option>
-          </select>
-          <p class="hint">화면 글자와 <b>검색 결과의 언어</b>가 함께 바뀝니다. Brave는 해당 국가 결과를, 위키백과는 해당 언어판을 우선합니다.</p>
-          <p class="hint">자동으로 두면 접속한 나라를 보고 정합니다. 한국에서 열면 한국어, 태국에서 열면 ไทย 입니다. 나라를 못 알아내면 기기 언어를 씁니다.</p>
+          <div class="sublabel">국가</div>
+          <select id="country"></select>
+          <p class="hint">국가를 고르면 그 나라 기준으로 검색합니다. 자동이면 <b>접속한 곳</b>을 보고 정합니다. 스페인에서 열면 스페인입니다.</p>
+
+          <div class="sublabel">언어</div>
+          <div class="chips" id="langchips"></div>
+          <select id="lang"></select>
+          <p class="hint">화면 글자와 <b>검색 결과 언어</b>가 함께 바뀝니다. 자동이면 국가에 맞춰 따라옵니다. 스페인에 있어도 한국어로 보고 싶으면 여기서 고정하세요.</p>
+          <p class="hint" id="lang-note"></p>
         </div>
       </details>
 
@@ -338,8 +345,17 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
 
       <p class="hint">위 값은 모두 <b>이 브라우저에만</b> 저장됩니다. 검색할 때마다 서버로 보내 해당 API를 부르는 데만 쓰고 서버에는 남기지 않습니다.</p>
 
-      <label>사용할 소스</label>
-      <div class="toggles" id="toggles"></div>
+      <details class="kc" id="kc-src">
+        <summary>
+          <span class="kc-ic">S</span>
+          <span class="kc-nm" id="nm-src">사용할 소스</span>
+          <span class="kc-st" id="st-src">전체</span>
+        </summary>
+        <div class="kc-body">
+          <div class="toggles" id="toggles"></div>
+        </div>
+      </details>
+
       <div class="row">
         <button type="button" id="allOn">전체 켜기</button>
         <button type="button" id="saveCfg" class="primary">저장</button>
@@ -370,6 +386,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var LS_MAIL = 'podogum_mail';
   var LS_SXNG = 'podogum_searxng';
   var LS_LANG = 'podogum_lang';
+  var LS_CTRY = 'podogum_country';
   var LS_TOUR = 'podogum_tour';
   var LS_PASS = 'podogum_pass';
   var LS_VID  = 'podogum_vid';
@@ -410,47 +427,162 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
   var SNIP_FIELDS  = ['desc','description','summary','content','text','body','memo','내용','설명','address','주소','price','가격'];
   var RRF_K = 60;
 
-  /* 화면 글자. 발급 안내문처럼 긴 글은 아직 한국어만 있습니다.
-     검색 화면에서 늘 보이는 것부터 옮겼습니다. */
+  /* 언어 목록. 화면 글자는 아래 T 에 있는 언어만 옮겨져 있고, 나머지는
+     화면이 English 로 나옵니다. 다만 검색 결과 언어는 40개 모두 적용됩니다.
+     Brave 검색어 언어, 위키백과 언어판, 식품 데이터베이스가 함께 바뀝니다. */
+  var LANGS = [
+    ['ko','한국어','KR'], ['en','English','US'], ['ja','日本語','JP'], ['zh','中文','CN'],
+    ['es','Español','ES'], ['fr','Français','FR'], ['de','Deutsch','DE'], ['th','ไทย','TH'],
+    ['vi','Tiếng Việt','VN'], ['id','Bahasa Indonesia','ID'], ['pt','Português','BR'],
+    ['it','Italiano','IT'], ['ru','Русский','RU'], ['ar','العربية','SA'], ['hi','हिन्दी','IN'],
+    ['tr','Türkçe','TR'], ['nl','Nederlands','NL'], ['pl','Polski','PL'], ['sv','Svenska','SE'],
+    ['da','Dansk','DK'], ['fi','Suomi','FI'], ['no','Norsk','NO'], ['cs','Čeština','CZ'],
+    ['el','Ελληνικά','GR'], ['he','עברית','IL'], ['hu','Magyar','HU'], ['ro','Română','RO'],
+    ['uk','Українська','UA'], ['ms','Bahasa Melayu','MY'], ['tl','Filipino','PH'],
+    ['bn','বাংলা','BD'], ['fa','فارسی','IR'], ['ur','اردو','PK'], ['ta','தமிழ்','IN'],
+    ['sw','Kiswahili','KE'], ['ca','Català','ES'], ['bg','Български','BG'],
+    ['sk','Slovenčina','SK'], ['hr','Hrvatski','HR'], ['sr','Српски','RS']
+  ];
+  var LANG_NAME = {};
+  LANGS.forEach(function (L) { LANG_NAME[L[0]] = L[1]; });
+
+  // 칩으로 바로 보여줄 언어. 나머지는 아래 목록에서 고릅니다.
+  var CHIPS = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'th', 'vi'];
+
+  var COUNTRIES = [
+    ['KR','대한민국'], ['US','United States'], ['JP','日本'], ['CN','中国'],
+    ['TW','臺灣'], ['HK','香港'], ['TH','ไทย'], ['VN','Việt Nam'],
+    ['ID','Indonesia'], ['MY','Malaysia'], ['PH','Philippines'], ['SG','Singapore'],
+    ['IN','India'], ['ES','España'], ['MX','México'], ['AR','Argentina'],
+    ['CL','Chile'], ['CO','Colombia'], ['PE','Perú'], ['FR','France'],
+    ['DE','Deutschland'], ['AT','Österreich'], ['CH','Schweiz'], ['IT','Italia'],
+    ['PT','Portugal'], ['BR','Brasil'], ['NL','Nederland'], ['BE','Belgique'],
+    ['GB','United Kingdom'], ['IE','Ireland'], ['CA','Canada'], ['AU','Australia'],
+    ['NZ','New Zealand'], ['RU','Россия'], ['UA','Україна'], ['PL','Polska'],
+    ['CZ','Česko'], ['SE','Sverige'], ['NO','Norge'], ['DK','Danmark'],
+    ['FI','Suomi'], ['GR','Ελλάδα'], ['TR','Türkiye'], ['IL','ישראל'],
+    ['SA','السعودية'], ['AE','الإمارات'], ['EG','مصر'], ['ZA','South Africa'],
+    ['KE','Kenya'], ['NG','Nigeria']
+  ];
+  var COUNTRY_NAME = {};
+  COUNTRIES.forEach(function (C) { COUNTRY_NAME[C[0]] = C[1]; });
+
+  // 나라 → 그 나라에서 쓰는 언어. 자동일 때만 씁니다.
+  var COUNTRY_LANG = {
+    KR:'ko', JP:'ja', CN:'zh', TW:'zh', HK:'zh', TH:'th', VN:'vi', ID:'id',
+    MY:'ms', PH:'tl', SG:'en', IN:'hi', ES:'es', MX:'es', AR:'es', CL:'es',
+    CO:'es', PE:'es', FR:'fr', BE:'fr', DE:'de', AT:'de', CH:'de', IT:'it',
+    PT:'pt', BR:'pt', NL:'nl', GB:'en', IE:'en', CA:'en', AU:'en', NZ:'en',
+    US:'en', RU:'ru', UA:'uk', PL:'pl', CZ:'cs', SE:'sv', NO:'no', DK:'da',
+    FI:'fi', GR:'el', TR:'tr', IL:'he', SA:'ar', AE:'ar', EG:'ar', ZA:'en',
+    KE:'sw', NG:'en', BD:'bn', IR:'fa', PK:'ur', BG:'bg', SK:'sk', HR:'hr', RS:'sr'
+  };
+
+  /* 화면 글자. 여기 없는 언어는 English 로 나옵니다.
+     안내문처럼 긴 글은 아직 한국어만 있습니다. */
   var T = {
     ko: { ph:'한 번에 여러 곳을 동시에 검색', go:'검색', gear:'설정',
           fused:'융합 순위', bysrc:'소스별', idle:'대기', off:'꺼짐',
           busy:'검색 중', conn:'연결 확인', nokey:'키 미입력', cnt:'건',
           head:'RRF 융합 결과 ', match:'곳 일치', save:'저장', allOn:'전체 켜기',
-          none:'결과가 없습니다. 다른 낱말로 검색해보세요.',
+          auto:'자동', none:'결과가 없습니다. 다른 낱말로 검색해보세요.',
           sum:'소스 %a/%b 완료 · 문서 %c건 · 중복 일치 %d건 · %e' },
     en: { ph:'Search many sources at once', go:'Search', gear:'Settings',
           fused:'Fused', bysrc:'By source', idle:'idle', off:'off',
           busy:'searching', conn:'connecting', nokey:'no key', cnt:'',
           head:'RRF fused results ', match:' sources', save:'Save', allOn:'Enable all',
-          none:'No results. Try different words.',
+          auto:'Auto', none:'No results. Try different words.',
           sum:'%a/%b sources · %c docs · %d overlapping · %e' },
+    ja: { ph:'複数のソースを同時に検索', go:'検索', gear:'設定',
+          fused:'統合順位', bysrc:'ソース別', idle:'待機', off:'オフ',
+          busy:'検索中', conn:'接続確認', nokey:'キー未入力', cnt:'件',
+          head:'RRF 統合結果 ', match:'件一致', save:'保存', allOn:'すべて有効',
+          auto:'自動', none:'結果がありません。別の語で検索してください。',
+          sum:'ソース %a/%b · 文書 %c件 · 重複 %d件 · %e' },
+    zh: { ph:'一次搜索多个来源', go:'搜索', gear:'设置',
+          fused:'融合排序', bysrc:'按来源', idle:'待机', off:'关闭',
+          busy:'搜索中', conn:'连接中', nokey:'缺少密钥', cnt:'条',
+          head:'RRF 融合结果 ', match:'处匹配', save:'保存', allOn:'全部开启',
+          auto:'自动', none:'没有结果，请换个词试试。',
+          sum:'来源 %a/%b · 文档 %c条 · 重复 %d条 · %e' },
+    es: { ph:'Busca en varias fuentes a la vez', go:'Buscar', gear:'Ajustes',
+          fused:'Fusionado', bysrc:'Por fuente', idle:'en espera', off:'apagado',
+          busy:'buscando', conn:'conectando', nokey:'sin clave', cnt:'',
+          head:'Resultados RRF ', match:' fuentes', save:'Guardar', allOn:'Activar todo',
+          auto:'Automático', none:'Sin resultados. Prueba otras palabras.',
+          sum:'%a/%b fuentes · %c docs · %d coincidencias · %e' },
     th: { ph:'ค้นหาหลายแหล่งพร้อมกัน', go:'ค้นหา', gear:'ตั้งค่า',
           fused:'รวมผล', bysrc:'แยกแหล่ง', idle:'รอ', off:'ปิด',
           busy:'กำลังค้นหา', conn:'เชื่อมต่อ', nokey:'ไม่มีคีย์', cnt:'',
           head:'ผลรวม RRF ', match:' แหล่ง', save:'บันทึก', allOn:'เปิดทั้งหมด',
-          none:'ไม่พบผลลัพธ์ ลองใช้คำอื่น', sum:'%a/%b แหล่ง · %c รายการ · ซ้ำ %d · %e' }
+          auto:'อัตโนมัติ', none:'ไม่พบผลลัพธ์ ลองใช้คำอื่น',
+          sum:'%a/%b แหล่ง · %c รายการ · ซ้ำ %d · %e' },
+    vi: { ph:'Tìm nhiều nguồn cùng lúc', go:'Tìm', gear:'Cài đặt',
+          fused:'Tổng hợp', bysrc:'Theo nguồn', idle:'chờ', off:'tắt',
+          busy:'đang tìm', conn:'đang kết nối', nokey:'thiếu khóa', cnt:'',
+          head:'Kết quả RRF ', match:' nguồn', save:'Lưu', allOn:'Bật tất cả',
+          auto:'Tự động', none:'Không có kết quả. Hãy thử từ khác.',
+          sum:'%a/%b nguồn · %c tài liệu · %d trùng · %e' },
+    id: { ph:'Cari banyak sumber sekaligus', go:'Cari', gear:'Pengaturan',
+          fused:'Gabungan', bysrc:'Per sumber', idle:'siap', off:'mati',
+          busy:'mencari', conn:'menyambung', nokey:'tanpa kunci', cnt:'',
+          head:'Hasil RRF ', match:' sumber', save:'Simpan', allOn:'Aktifkan semua',
+          auto:'Otomatis', none:'Tidak ada hasil. Coba kata lain.',
+          sum:'%a/%b sumber · %c dokumen · %d tumpang tindih · %e' },
+    fr: { ph:'Cherchez plusieurs sources à la fois', go:'Chercher', gear:'Réglages',
+          fused:'Fusionné', bysrc:'Par source', idle:'en attente', off:'désactivé',
+          busy:'recherche', conn:'connexion', nokey:'clé manquante', cnt:'',
+          head:'Résultats RRF ', match:' sources', save:'Enregistrer', allOn:'Tout activer',
+          auto:'Automatique', none:'Aucun résultat. Essayez d’autres mots.',
+          sum:'%a/%b sources · %c docs · %d en commun · %e' },
+    de: { ph:'Mehrere Quellen gleichzeitig suchen', go:'Suchen', gear:'Einstellungen',
+          fused:'Fusioniert', bysrc:'Nach Quelle', idle:'bereit', off:'aus',
+          busy:'sucht', conn:'verbindet', nokey:'kein Schlüssel', cnt:'',
+          head:'RRF-Ergebnisse ', match:' Quellen', save:'Speichern', allOn:'Alle aktivieren',
+          auto:'Automatisch', none:'Keine Treffer. Andere Wörter versuchen.',
+          sum:'%a/%b Quellen · %c Dok. · %d Überschneidungen · %e' },
+    pt: { ph:'Pesquise várias fontes de uma vez', go:'Pesquisar', gear:'Configurações',
+          fused:'Fundido', bysrc:'Por fonte', idle:'aguardando', off:'desligado',
+          busy:'buscando', conn:'conectando', nokey:'sem chave', cnt:'',
+          head:'Resultados RRF ', match:' fontes', save:'Salvar', allOn:'Ativar tudo',
+          auto:'Automático', none:'Sem resultados. Tente outras palavras.',
+          sum:'%a/%b fontes · %c docs · %d sobrepostos · %e' },
+    ru: { ph:'Поиск сразу по многим источникам', go:'Найти', gear:'Настройки',
+          fused:'Сводный', bysrc:'По источникам', idle:'ожидание', off:'выкл',
+          busy:'поиск', conn:'соединение', nokey:'нет ключа', cnt:'',
+          head:'Результаты RRF ', match:' источников', save:'Сохранить', allOn:'Включить все',
+          auto:'Авто', none:'Ничего не найдено. Попробуйте другие слова.',
+          sum:'%a/%b источников · %c док. · %d совпадений · %e' }
   };
 
-  // 서버가 알려준 접속 국가. 자동 모드일 때만 씁니다.
+  // 서버가 알려준 접속 국가
   var geoCountry = '';
 
-  function langPref() { return readLS(LS_LANG, 'auto') || 'auto'; }
+  function langPref()  { return readLS(LS_LANG, 'auto') || 'auto'; }
+  function ctryPref()  { return readLS(LS_CTRY, 'auto') || 'auto'; }
 
-  /* 자동일 때는 접속한 나라를 먼저 봅니다. 기기 언어는 여행 중이거나
-     외국 기기를 쓸 때 실제 위치와 어긋나서, 나라를 알면 그쪽이 정확합니다. */
-  function lang() {
-    var p = langPref();
-    if (p !== 'auto') return T[p] ? p : 'ko';
-    if (geoCountry === 'KR') return 'ko';
-    if (geoCountry === 'TH') return 'th';
-    if (geoCountry) return 'en';
-    var n = (navigator.language || 'ko').toLowerCase();
-    if (n.indexOf('ko') === 0) return 'ko';
-    if (n.indexOf('th') === 0) return 'th';
-    return 'en';
+  // 실제로 적용될 국가. 자동이면 접속한 곳입니다.
+  function country() {
+    var p = ctryPref();
+    if (p !== 'auto') return p;
+    return geoCountry || '';
   }
-  function t(k) { return (T[lang()] || T.ko)[k]; }
+
+  /* 실제로 적용될 언어.
+     자동이면 국가를 따라갑니다. 스페인에 있으면 Español 이 됩니다.
+     국가도 모르면 기기 언어로 물러섭니다. */
+  function langCode() {
+    var p = langPref();
+    if (p !== 'auto') return p;
+    var c = country();
+    if (c && COUNTRY_LANG[c]) return COUNTRY_LANG[c];
+    var n = (navigator.language || '').toLowerCase().split('-')[0];
+    return LANG_NAME[n] ? n : 'en';
+  }
+
+  // 화면 글자는 옮겨진 언어만. 없으면 English 입니다.
+  function lang() { return T[langCode()] ? langCode() : 'en'; }
+  function t(k) { return (T[lang()] || T.en)[k]; }
 
   // 등급(tier)은 worker 가 계산해서 결과에 실어 보냅니다. 이 파일에는 SOLO_TIER
   // 표가 없습니다. 예전에는 양쪽에 같은 표가 있었는데, 한쪽만 고치면 같은 검색이
@@ -530,6 +662,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     var x = (readLS(LS_SXNG, '') || '').trim();  if (x) h['X-Searxng-Url'] = x;
     var r2 = (readLS(LS_TOUR, '') || '').trim(); if (r2) h['X-Tour-Key'] = r2;
     h['X-Lang'] = langPref();
+    h['X-Country'] = ctryPref();
     var p2 = (readLS(LS_PASS, '') || '').trim(); if (p2) h['X-Pass-Key'] = p2;
     h['X-Visitor-Id'] = visitorId();
     return h;
@@ -1053,13 +1186,15 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       });
 
       panel.classList.remove('open');
-      buildBoard();
+      applyLang();
     });
   }
 
   // 언어가 바뀌면 화면에 박혀 있는 글자를 다시 칠합니다.
+  var repaintLang = null;
+
   function applyLang() {
-    document.documentElement.lang = lang();
+    document.documentElement.lang = langCode();
     input.placeholder = t('ph');
     goBtn.textContent = t('go');
     $('gear').textContent = t('gear');
@@ -1071,27 +1206,94 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
 
     var badge = $('st-lang');
     if (badge) {
-      var p = langPref();
-      var NAME = { ko: '한국어', en: 'English', th: 'ไทย' };
-      badge.textContent = p === 'auto' ? '자동 · ' + NAME[lang()] : NAME[p];
-      badge.className = p === 'auto' ? 'kc-st' : 'kc-st on';
+      var fixed = langPref() !== 'auto' || ctryPref() !== 'auto';
+      var nm = LANG_NAME[langCode()] || langCode();
+      badge.textContent = fixed ? nm : t('auto') + ' · ' + nm;
+      badge.className = fixed ? 'kc-st on' : 'kc-st';
     }
+    var sb = $('st-src');
+    if (sb) {
+      var all = visibleRemote().concat(hasLocalData() ? [LOCAL] : []);
+      var on = all.filter(function (x) { return isOn(x.id); }).length;
+      sb.textContent = on === all.length ? t('auto') === 'Auto' ? 'all ' + all.length : '전체 ' + all.length
+                                         : on + ' / ' + all.length;
+      sb.className = on === all.length ? 'kc-st' : 'kc-st on';
+    }
+    if (repaintLang) repaintLang();
     buildBoard();
     if (order && order.length) render();
   }
 
   function initLang() {
-    var sel = $('lang');
-    if (!sel) return;
-    sel.value = langPref();
-    sel.addEventListener('change', function () {
-      writeLS(LS_LANG, sel.value);
+    var selL = $('lang'), selC = $('country'), chips = $('langchips');
+    if (!selL || !selC) return;
+
+    // 국가 목록
+    function fillCountry() {
+      clear(selC);
+      var o = el('option', null, t('auto') + (geoCountry ? ' · ' + (COUNTRY_NAME[geoCountry] || geoCountry) : ''));
+      o.value = 'auto';
+      selC.appendChild(o);
+      COUNTRIES.forEach(function (C) {
+        var x = el('option', null, C[1]);
+        x.value = C[0];
+        selC.appendChild(x);
+      });
+      selC.value = ctryPref();
+    }
+
+    // 전체 언어 목록
+    function fillLang() {
+      clear(selL);
+      var o = el('option', null, t('auto') + ' · ' + (LANG_NAME[langCode()] || langCode()));
+      o.value = 'auto';
+      selL.appendChild(o);
+      LANGS.forEach(function (L) {
+        var x = el('option', null, L[1]);
+        x.value = L[0];
+        selL.appendChild(x);
+      });
+      selL.value = langPref();
+    }
+
+    // 자주 쓰는 언어 칩
+    function fillChips() {
+      clear(chips);
+      CHIPS.forEach(function (code) {
+        var b = el('button', 'chip', code === 'auto' ? t('auto') : LANG_NAME[code]);
+        b.type = 'button';
+        b.setAttribute('aria-pressed', langPref() === code ? 'true' : 'false');
+        b.addEventListener('click', function () {
+          writeLS(LS_LANG, code);
+          applyLang();
+        });
+        chips.appendChild(b);
+      });
+    }
+
+    selC.addEventListener('change', function () {
+      writeLS(LS_CTRY, selC.value);
       applyLang();
     });
-    applyLang();
+    selL.addEventListener('change', function () {
+      writeLS(LS_LANG, selL.value);
+      applyLang();
+    });
+
+    // applyLang 이 다시 부를 수 있게 밖으로 걸어둡니다.
+    repaintLang = function () {
+      fillCountry(); fillLang(); fillChips();
+      var note = $('lang-note');
+      if (note) {
+        note.textContent = T[langCode()]
+          ? ''
+          : '화면 글자는 English 로 나옵니다. 검색 결과는 ' + (LANG_NAME[langCode()] || '') + ' 로 나옵니다.';
+      }
+    };
+    repaintLang();
 
     // 접속 국가는 서버만 압니다. 첫 검색을 기다리지 않고 미리 물어봅니다.
-    if (langPref() === 'auto') {
+    if (ctryPref() === 'auto') {
       preflight().then(function (info) {
         if (info && info.country && info.country !== geoCountry) {
           geoCountry = info.country;
