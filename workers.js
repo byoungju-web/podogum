@@ -39,7 +39,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id, X-Lang',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id, X-Lang, X-Country',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -268,18 +268,46 @@ async function handlePass(request, env, origin) {
    기기를 쓰는 경우가 흔하기 때문입니다.
    ======================================================= */
 
-const LANG_BY_COUNTRY = { KR: 'ko', TH: 'th' };
-const LANG_CFG = {
-  ko: { brave: 'KR', wiki: ['ko', 'en'], off: 'kr' },
-  th: { brave: 'TH', wiki: ['th', 'en'], off: 'th' },
-  en: { brave: 'US', wiki: ['en'],       off: 'world' }
+// 나라 → 그 나라 언어. 화면과 같은 표를 씁니다.
+const COUNTRY_LANG = {
+  KR:'ko', JP:'ja', CN:'zh', TW:'zh', HK:'zh', TH:'th', VN:'vi', ID:'id',
+  MY:'ms', PH:'tl', SG:'en', IN:'hi', ES:'es', MX:'es', AR:'es', CL:'es',
+  CO:'es', PE:'es', FR:'fr', BE:'fr', DE:'de', AT:'de', CH:'de', IT:'it',
+  PT:'pt', BR:'pt', NL:'nl', GB:'en', IE:'en', CA:'en', AU:'en', NZ:'en',
+  US:'en', RU:'ru', UA:'uk', PL:'pl', CZ:'cs', SE:'sv', NO:'no', DK:'da',
+  FI:'fi', GR:'el', TR:'tr', IL:'he', SA:'ar', AE:'ar', EG:'ar', ZA:'en',
+  KE:'sw', NG:'en', BD:'bn', IR:'fa', PK:'ur', BG:'bg', SK:'sk', HR:'hr', SR:'sr'
 };
 
-function pickLang(request, opts) {
-  const asked = (opts && opts.lang) || 'auto';
-  if (asked !== 'auto' && LANG_CFG[asked]) return asked;
-  const c = (request.headers.get('CF-IPCountry') || '').toUpperCase();
-  return LANG_BY_COUNTRY[c] || 'en';
+// 언어 → 그 언어의 본거지. 나라를 모를 때 검색 지역으로 씁니다.
+const LANG_HOME = {
+  ko:'KR', en:'US', ja:'JP', zh:'CN', es:'ES', fr:'FR', de:'DE', th:'TH',
+  vi:'VN', id:'ID', pt:'BR', it:'IT', ru:'RU', ar:'SA', hi:'IN', tr:'TR',
+  nl:'NL', pl:'PL', sv:'SE', da:'DK', fi:'FI', no:'NO', cs:'CZ', el:'GR',
+  he:'IL', hu:'HU', ro:'RO', uk:'UA', ms:'MY', tl:'PH', bn:'BD', fa:'IR',
+  ur:'PK', ta:'IN', sw:'KE', ca:'ES', bg:'BG', sk:'SK', hr:'HR', sr:'RS'
+};
+
+// Open Food Facts 는 나라별 주소를 씁니다. 없는 나라는 world 로 갑니다.
+const OFF_HOST = {
+  KR:'kr', JP:'jp', TH:'th', FR:'fr', DE:'de', ES:'es', IT:'it', BE:'be',
+  NL:'nl', PT:'pt', BR:'br', US:'us', GB:'uk', CA:'ca', AU:'au', CH:'ch',
+  MX:'mx', AR:'ar', PL:'pl', RU:'ru', CN:'cn', VN:'vn', ID:'id', IN:'in'
+};
+
+/* 설정이 자동이면 접속한 나라를 씁니다. 스페인에서 열면 스페인 · Español 입니다.
+   나라만 고정하면 언어가 따라오고, 언어만 고정하면 나라를 무시하고 그 언어로 갑니다. */
+function pickLocale(request, opts) {
+  const geo = (request.headers.get('CF-IPCountry') || '').toUpperCase();
+  const askC = ((opts && opts.country) || 'auto').toUpperCase();
+  const askL = (opts && opts.lang) || 'auto';
+
+  let ctry = askC !== 'AUTO' ? askC : geo;
+  let lang = askL !== 'auto' && LANG_HOME[askL] ? askL
+           : (COUNTRY_LANG[ctry] || 'en');
+  if (!ctry) ctry = LANG_HOME[lang] || 'US';
+
+  return { lang: lang, country: ctry, geo: geo, off: OFF_HOST[ctry] || 'world' };
 }
 
 /* =======================================================
@@ -294,9 +322,9 @@ async function fromBrave(q, env, opts) {
   const u = new URL('https://api.search.brave.com/res/v1/web/search');
   u.searchParams.set('q', q);
   u.searchParams.set('count', '10');
-  const cfg = LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko;
-  u.searchParams.set('country', cfg.brave);
-  u.searchParams.set('search_lang', (opts && opts.lang2) || 'ko');
+  const lc = (opts && opts.locale) || { lang: 'ko', country: 'KR' };
+  u.searchParams.set('country', lc.country);
+  u.searchParams.set('search_lang', lc.lang);
   u.searchParams.set('safesearch', 'moderate');
   const data = await grab(u.toString(), {
     headers: { 'X-Subscription-Token': key, 'Accept-Encoding': 'gzip' }
@@ -396,7 +424,7 @@ async function fromSearxng(q, env, opts) {
   const u = new URL(base + '/search');
   u.searchParams.set('q', q);
   u.searchParams.set('format', 'json');
-  u.searchParams.set('language', (opts && opts.lang2) || 'ko');
+  u.searchParams.set('language', ((opts && opts.locale) || {}).lang || 'ko');
   const data = await grab(u.toString());
   return (data.results || []).slice(0, 12).map(function (x) {
     return { title: strip(x.title, 130), url: x.url, snippet: strip(x.content, 200) };
@@ -467,8 +495,10 @@ function shareWord(title, q) {
 }
 
 async function fromWikipedia(q, env, opts) {
-  const cfg = LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko;
-  const both = await Promise.allSettled(cfg.wiki.map(function (L) { return wikiLang(q, L); }));
+  // 해당 언어판을 먼저, 영어판을 덤으로. 영어권이면 한 번만 부릅니다.
+  const L = ((opts && opts.locale) || {}).lang || 'ko';
+  const langs = L === 'en' ? ['en'] : [L, 'en'];
+  const both = await Promise.allSettled(langs.map(function (x) { return wikiLang(q, x); }));
   let out = [];
   both.forEach(function (r) {
     if (r.status !== 'fulfilled') return;
@@ -1196,7 +1226,7 @@ async function fromProduct(q, env, opts) {
   // 2. 성분·안전 관련 낱말이 있을 때만 제품명으로 검색
   if (!PRODUCT_HINT.test(t)) throw new Error('제품 질문 아님');
 
-  const host = (LANG_CFG[(opts && opts.lang2) || 'ko'] || LANG_CFG.ko).off;
+  const host = ((opts && opts.locale) || {}).off || 'world';
   const u = new URL('https://' + host + '.openfoodfacts.org/cgi/search.pl');
   u.searchParams.set('search_terms', t.replace(PRODUCT_HINT, '').trim() || t);
   u.searchParams.set('search_simple', '1');
@@ -1354,13 +1384,14 @@ async function handleSearch(request, env, ctx, origin) {
     searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
     tourKey:      (request.headers.get('X-Tour-Key') || '').trim(),
     lang:         (request.headers.get('X-Lang') || 'auto').trim(),
+    country:      (request.headers.get('X-Country') || 'auto').trim(),
     passKey:      (request.headers.get('X-Pass-Key') || '').trim(),
     visitorId:    (request.headers.get('X-Visitor-Id') || '').trim()
   };
 
-  // lang2 는 실제로 쓸 언어입니다. 어댑터들이 이 값만 봅니다.
-  opts.lang2 = pickLang(request, opts);
-  const country = (request.headers.get('CF-IPCountry') || '').toUpperCase();
+  // locale 은 실제로 쓸 언어와 나라입니다. 어댑터들이 이 값만 봅니다.
+  opts.locale = pickLocale(request, opts);
+  const country = opts.locale.geo;
 
   const only = (src.searchParams.get('only') || '').split(',').filter(Boolean);
   const active = only.length
@@ -1392,7 +1423,7 @@ async function handleSearch(request, env, ctx, origin) {
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
   cacheUrl.searchParams.set('tr', (opts.tourKey || env.TOUR_KEY) ? '1' : '0');
   // 언어가 다르면 결과도 다릅니다. 이게 없으면 한국어 결과가 태국 방문자에게 갑니다.
-  cacheUrl.searchParams.set('lg', opts.lang2);
+  cacheUrl.searchParams.set('lg', opts.locale.lang + '-' + opts.locale.country);
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
   const hit = await cache.match(cacheKey);
@@ -1400,7 +1431,7 @@ async function handleSearch(request, env, ctx, origin) {
     const body = await hit.json();
     body.cache = 'HIT';
     body.country = country;
-    body.lang = opts.lang2;
+    body.lang = opts.locale.lang;
     if (wantsBrave) body.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
     return json(body, 200, origin);
   }
@@ -1467,7 +1498,7 @@ async function handleSearch(request, env, ctx, origin) {
 
   // 사람마다 다른 값이라 캐시에는 넣지 않습니다
   payload.country = country;
-  payload.lang = opts.lang2;
+  payload.lang = opts.locale.lang;
   if (wantsBrave) payload.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
   return json(payload, 200, origin);
 }
@@ -1486,7 +1517,7 @@ export default {
         service: 'podogum',
         // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
         // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.4-lang',
+        version: '2.5-locale',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
