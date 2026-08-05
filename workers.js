@@ -1,6 +1,6 @@
 /**
  * podogum Fusion Search Worker
- * © 2026 BJ LEE
+ * © 2026 podogum
  *
  * 10개 소스를 병렬로 호출하고 RRF(Reciprocal Rank Fusion)로 융합합니다.
  *
@@ -1132,7 +1132,6 @@ export default {
       return json({
         service: 'podogum',
         version: '2.0-fusion',
-        owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
       kv: Boolean(env.PODOGUM_KV),
