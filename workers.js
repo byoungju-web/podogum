@@ -8,8 +8,6 @@
  *   BRAVE_API_KEY  (Secret, 선택)  없으면 Brave만 건너뜁니다
  *   SEARXNG_URL    (Plain,  선택)  예: https://searx.example.org
  *                  JSON 출력이 켜진 인스턴스여야 합니다
- *   OPENALEX_MAIL  (Plain,  권장)  wrangler.toml [vars] 에 넣으세요.
- *                  대시보드에 직접 넣으면 재배포 때마다 지워집니다.
  */
 
 const ALLOWED_ORIGINS = [
@@ -24,11 +22,14 @@ const ALLOWED_ORIGINS = [
 
 const CACHE_TTL = 1800;        // 30분
 const SOURCE_TIMEOUT = 4500;   // 소스별 4.5초
-const UA = 'podogum/2.0 (+https://podogum.kr)';
+const UA = 'podogum/2.0 (+https://podolang.kr)';
 const RRF_K = 60;
 
 const FREE_PER_DAY_DEFAULT   = 3;    // 방문자 1인당 하루 무료 Brave 검색
-const GLOBAL_PER_DAY_DEFAULT = 300;  // 전체 하루 상한 (크레딧 보호용 안전판)              // 표준값
+// 전체 하루 상한. Brave와 Tavily 모두 월 1,000 크레딧인데 검색 한 번에 둘 다 부르니
+// 실제 여유는 월 1,000회입니다. 30일로 나누면 하루 33회라 30으로 잡았습니다.
+// 이보다 크게 두면 월초 며칠 만에 크레딧이 바닥나고 남은 달은 웹검색이 죽습니다.
+const GLOBAL_PER_DAY_DEFAULT = 30;
 
 /* =======================================================
    공통
@@ -39,7 +40,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token, X-Tour-Key, X-Pass-Key, X-Visitor-Id, X-Lang, X-Country',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Brave-Key, X-Tavily-Key, X-Stackex-Key, X-Openalex-Mail, X-Searxng-Url, X-Notion-Token',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -52,61 +53,13 @@ function json(data, status, origin) {
   return new Response(JSON.stringify(data), { status: status, headers: headers });
 }
 
-/* HTML 숫자 실체참조. 이름 있는 것만 풀면 &#x27; 가 화면에 그대로 남습니다.
-   위키백과 발췌에서 "&#x27;베네치아&#x27;라는" 처럼 보이던 원인입니다. */
-function unent(s) {
-  return s
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#x([0-9a-fA-F]{1,6});/g, function (m, h) {
-      const n = parseInt(h, 16);
-      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' ';
-    })
-    .replace(/&#(\d{1,7});/g, function (m, d) {
-      const n = parseInt(d, 10);
-      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' ';
-    })
-    .replace(/&amp;/g, '&');   // 마지막이어야 합니다
-}
-
-/* 발췌에는 본문이 아닌 것들이 섞여 옵니다.
-   네이버 블로그는 페이지에 박아둔 JSON 이 그대로 딸려오고,
-   표가 있는 페이지는 칸 구분 막대가, 나무위키는 "Read more" 가 붙습니다.
-   눈에 거슬리는 것만 골라 털어냅니다. 본문은 건드리지 않습니다. */
-function scrub(s) {
-  /* 1. JSON 조각. 여기서부터 끝까지는 본문이 아닙니다.
-     키가 둘 이상 이어지는 덩어리만 봅니다. 그냥 {"a": 1} 이 본문에 나오는
-     경우(스택오버플로 제목 등)까지 자르면 멀쩡한 글을 버립니다. */
-  const j = s.search(/\[?\s*\{\s*"[^"]{1,60}"\s*:\s*("[^"]*"|\d+|null|true|false)\s*,\s*"/);
-  if (j === 0) return '';
-  if (j > 0) s = s.slice(0, j);
-
-  // 2. 표 구분선과 칸 막대
-  s = s.replace(/\|\s*[-=:]{2,}\s*/g, ' ')
-       .replace(/\|{2,}/g, ' ')
-       .replace(/\s*\|\s*/g, ' · ')
-       .replace(/[-=_~]{4,}/g, ' ');
-
-  // 3. 공백 정리 후 앞뒤에 남은 구분자 떼기
-  s = s.replace(/\s+/g, ' ').trim();
-  s = s.replace(/^[·,;:\s]+/, '').replace(/[·,;:\s]*[[{(]?\s*$/, '');
-
-  // 4. 더보기 꼬리말
-  s = s.replace(/(\.{2,}|…)?\s*(read\s*more|더\s*보기|자세히\s*보기|continue\s*reading)\s*$/i, '');
-
-  // 길이로 버리지 않습니다. 이 함수는 제목에도 쓰여서
-  // "vue", "npm" 같은 짧은 제목이 통째로 사라집니다.
-  return s.replace(/(·\s*){2,}/g, '· ').trim();
-}
-
 function strip(text, limit) {
   if (!text) return '';
-  let s = String(text).replace(/<[^>]*>/g, ' ');
-  s = unent(s);
-  s = scrub(s);
+  let s = String(text).replace(/<[^>]*>/g, '');
+  s = s.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+       .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  s = s.replace(/\s+/g, ' ').trim();
   return s.length > limit ? s.slice(0, limit) + '…' : s;
 }
 
@@ -309,56 +262,6 @@ async function handlePass(request, env, origin) {
 }
 
 /* =======================================================
-   언어
-
-   화면 언어와 검색 언어를 같이 움직입니다. 자동일 때는 Cloudflare 가 알려주는
-   접속 국가를 씁니다. 기기 언어보다 정확합니다. 여행 중이거나 외국에서 산
-   기기를 쓰는 경우가 흔하기 때문입니다.
-   ======================================================= */
-
-// 나라 → 그 나라 언어. 화면과 같은 표를 씁니다.
-const COUNTRY_LANG = {
-  KR:'ko', JP:'ja', CN:'zh', TW:'zh', HK:'zh', TH:'th', VN:'vi', ID:'id',
-  MY:'ms', PH:'tl', SG:'en', IN:'hi', ES:'es', MX:'es', AR:'es', CL:'es',
-  CO:'es', PE:'es', FR:'fr', BE:'fr', DE:'de', AT:'de', CH:'de', IT:'it',
-  PT:'pt', BR:'pt', NL:'nl', GB:'en', IE:'en', CA:'en', AU:'en', NZ:'en',
-  US:'en', RU:'ru', UA:'uk', PL:'pl', CZ:'cs', SE:'sv', NO:'no', DK:'da',
-  FI:'fi', GR:'el', TR:'tr', IL:'he', SA:'ar', AE:'ar', EG:'ar', ZA:'en',
-  KE:'sw', NG:'en', BD:'bn', IR:'fa', PK:'ur', BG:'bg', SK:'sk', HR:'hr', SR:'sr'
-};
-
-// 언어 → 그 언어의 본거지. 나라를 모를 때 검색 지역으로 씁니다.
-const LANG_HOME = {
-  ko:'KR', en:'US', ja:'JP', zh:'CN', es:'ES', fr:'FR', de:'DE', th:'TH',
-  vi:'VN', id:'ID', pt:'BR', it:'IT', ru:'RU', ar:'SA', hi:'IN', tr:'TR',
-  nl:'NL', pl:'PL', sv:'SE', da:'DK', fi:'FI', no:'NO', cs:'CZ', el:'GR',
-  he:'IL', hu:'HU', ro:'RO', uk:'UA', ms:'MY', tl:'PH', bn:'BD', fa:'IR',
-  ur:'PK', ta:'IN', sw:'KE', ca:'ES', bg:'BG', sk:'SK', hr:'HR', sr:'RS'
-};
-
-// Open Food Facts 는 나라별 주소를 씁니다. 없는 나라는 world 로 갑니다.
-const OFF_HOST = {
-  KR:'kr', JP:'jp', TH:'th', FR:'fr', DE:'de', ES:'es', IT:'it', BE:'be',
-  NL:'nl', PT:'pt', BR:'br', US:'us', GB:'uk', CA:'ca', AU:'au', CH:'ch',
-  MX:'mx', AR:'ar', PL:'pl', RU:'ru', CN:'cn', VN:'vn', ID:'id', IN:'in'
-};
-
-/* 설정이 자동이면 접속한 나라를 씁니다. 스페인에서 열면 스페인 · Español 입니다.
-   나라만 고정하면 언어가 따라오고, 언어만 고정하면 나라를 무시하고 그 언어로 갑니다. */
-function pickLocale(request, opts) {
-  const geo = (request.headers.get('CF-IPCountry') || '').toUpperCase();
-  const askC = ((opts && opts.country) || 'auto').toUpperCase();
-  const askL = (opts && opts.lang) || 'auto';
-
-  let ctry = askC !== 'AUTO' ? askC : geo;
-  let lang = askL !== 'auto' && LANG_HOME[askL] ? askL
-           : (COUNTRY_LANG[ctry] || 'en');
-  if (!ctry) ctry = LANG_HOME[lang] || 'US';
-
-  return { lang: lang, country: ctry, geo: geo, off: OFF_HOST[ctry] || 'world' };
-}
-
-/* =======================================================
    소스별 어댑터
    각 어댑터는 [{title, url, snippet, extra}] 를 반환합니다
    ======================================================= */
@@ -370,9 +273,8 @@ async function fromBrave(q, env, opts) {
   const u = new URL('https://api.search.brave.com/res/v1/web/search');
   u.searchParams.set('q', q);
   u.searchParams.set('count', '10');
-  const lc = (opts && opts.locale) || { lang: 'ko', country: 'KR' };
-  u.searchParams.set('country', lc.country);
-  u.searchParams.set('search_lang', lc.lang);
+  u.searchParams.set('country', 'KR');
+  u.searchParams.set('search_lang', 'ko');
   u.searchParams.set('safesearch', 'moderate');
   const data = await grab(u.toString(), {
     headers: { 'X-Subscription-Token': key, 'Accept-Encoding': 'gzip' }
@@ -472,7 +374,7 @@ async function fromSearxng(q, env, opts) {
   const u = new URL(base + '/search');
   u.searchParams.set('q', q);
   u.searchParams.set('format', 'json');
-  u.searchParams.set('language', ((opts && opts.locale) || {}).lang || 'ko');
+  u.searchParams.set('language', 'ko');
   const data = await grab(u.toString());
   return (data.results || []).slice(0, 12).map(function (x) {
     return { title: strip(x.title, 130), url: x.url, snippet: strip(x.content, 200) };
@@ -542,11 +444,8 @@ function shareWord(title, q) {
   return false;
 }
 
-async function fromWikipedia(q, env, opts) {
-  // 해당 언어판을 먼저, 영어판을 덤으로. 영어권이면 한 번만 부릅니다.
-  const L = ((opts && opts.locale) || {}).lang || 'ko';
-  const langs = L === 'en' ? ['en'] : [L, 'en'];
-  const both = await Promise.allSettled(langs.map(function (x) { return wikiLang(q, x); }));
+async function fromWikipedia(q) {
+  const both = await Promise.allSettled([wikiLang(q, 'ko'), wikiLang(q, 'en')]);
   let out = [];
   both.forEach(function (r) {
     if (r.status !== 'fulfilled') return;
@@ -558,18 +457,7 @@ async function fromWikipedia(q, env, opts) {
   return out;
 }
 
-/* 개발·학술 소스는 영문 기술 용어를 다루는 색인입니다.
-   "부산 가볼만한곳" 에 맞을 수 있는 문서가 애초에 없는데도 각각 1초씩 쓰고
-   0건을 냅니다. 한글만으로 된 질문이면 아예 부르지 않습니다.
-   영문이 섞여 있으면(예: "부산 airbnb") 그대로 켭니다. */
-function looksTechnical(q) {
-  const latin = (q.match(/[A-Za-z]/g) || []).length;
-  if (latin >= 3) return true;                 // 영문 낱말이 있으면 통과
-  return /[0-9]{2,}|[<>{}/\\#@$]|에러|오류|버그|코드|함수|라이브러리|프레임워크|알고리즘|논문|깃허브/.test(q);
-}
-
 async function fromHackerNews(q) {
-  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://hn.algolia.com/api/v1/search');
   u.searchParams.set('query', q);
   u.searchParams.set('hitsPerPage', '6');
@@ -596,7 +484,6 @@ function shapeSo(data) {
 }
 
 async function fromStackOverflow(q, env, opts) {
-  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://api.stackexchange.com/2.3/search/advanced');
   u.searchParams.set('q', q);
   u.searchParams.set('site', 'stackoverflow');
@@ -609,8 +496,7 @@ async function fromStackOverflow(q, env, opts) {
 }
 
 async function fromArxiv(q) {
-  if (!looksTechnical(q)) throw new Error('논문 질문 아님');
-  const u = new URL('https://export.arxiv.org/api/query');
+  const u = new URL('http://export.arxiv.org/api/query');
   u.searchParams.set('search_query', 'all:' + q);
   u.searchParams.set('start', '0');
   u.searchParams.set('max_results', '6');
@@ -640,21 +526,13 @@ async function fromArxiv(q) {
 }
 
 async function fromOpenAlex(q, env, opts) {
-  if (!looksTechnical(q)) throw new Error('논문 질문 아님');
   const u = new URL('https://api.openalex.org/works');
   u.searchParams.set('search', q);
   u.searchParams.set('per-page', '6');
-  // OpenAlex 는 연락처가 없는 요청을 공용 대역으로 묶습니다. Worker 는 세계 각지의
-  // 공유 IP에서 나가기 때문에 그 대역이 남들 요청으로 이미 차 있고, 그래서 429 가
-  // 났습니다. 메일을 넣으면 polite pool 로 옮겨져 사실상 막히지 않습니다.
-  // 쿼리와 User-Agent 양쪽에 넣는 것이 OpenAlex 가 안내하는 방식입니다.
+  // 실제로 받는 메일 주소를 OPENALEX_MAIL에 넣으면 여유 있는 대역으로 처리됩니다
   const mail = (opts && opts.openalexMail) || (env && env.OPENALEX_MAIL);
-  const headers = {};
-  if (mail) {
-    u.searchParams.set('mailto', mail);
-    headers['User-Agent'] = 'podogum/2.0 (+https://podogum.kr; mailto:' + mail + ')';
-  }
-  const data = await grab(u.toString(), { retries: 0, headers: headers });
+  if (mail) u.searchParams.set('mailto', mail);
+  const data = await grab(u.toString());
   return (data.results || []).map(function (x) {
     return {
       title: strip(x.display_name, 130),
@@ -666,7 +544,6 @@ async function fromOpenAlex(q, env, opts) {
 }
 
 async function fromGithub(q) {
-  if (!looksTechnical(q)) throw new Error('개발 질문 아님');
   const u = new URL('https://api.github.com/search/repositories');
   u.searchParams.set('q', q);
   u.searchParams.set('per_page', '6');
@@ -679,247 +556,6 @@ async function fromGithub(q) {
       extra: '★' + x.stargazers_count + (x.language ? ' · ' + x.language : '')
     };
   });
-}
-
-/* =======================================================
-   취약점 (OSV, 구글 운영, 키 없음)
-
-   "이 라이브러리 지금 안전한가" 에 답할 수 있는 소스가 지금까지 하나도
-   없었습니다. Brave·Tavily·GitHub 를 다 합쳐도 블로그 글이 나올 뿐이고,
-   실제 취약점 목록은 OSV 에만 있습니다.
-
-   OSV 에는 전문 검색이 없습니다. 패키지 이름과 생태계만 받습니다.
-   그래서 검색어가 패키지 이름 그 자체일 때만 켜집니다.
-     lodash                       → 켜짐
-     github.com/gin-gonic/gin     → 켜짐
-     제주도 맛집                    → 꺼짐
-     attention mechanism          → 꺼짐 (낱말이 둘이라 패키지명이 아님)
-   ======================================================= */
-
-const OSV_ECOS = ['npm', 'PyPI', 'crates.io', 'Go', 'Maven'];
-const OSV_SEV = { CRITICAL: '치명적', HIGH: '높음', MODERATE: '보통', MEDIUM: '보통', LOW: '낮음' };
-
-function packageNameLike(q) {
-  const t = q.trim();
-  if (/\s/.test(t)) return false;                  // 낱말 하나여야 합니다
-  if (t.length < 2 || t.length > 80) return false;
-  if (!/^[A-Za-z@]/.test(t)) return false;         // 영문 또는 @scope 로 시작
-  return /^[A-Za-z0-9._@:/-]+$/.test(t);
-}
-
-async function osvQuery(name, eco) {
-  const data = await grab('https://api.osv.dev/v1/query', {
-    method: 'POST',
-    retries: 0,
-    timeout: 3000,
-    body: JSON.stringify({ package: { name: name, ecosystem: eco } })
-  });
-  return ((data && data.vulns) || []).map(function (v) {
-    if (!v.id) return null;
-    v._eco = eco;
-    return v;
-  }).filter(Boolean);
-}
-
-function shapeVuln(v) {
-  // CVE 번호가 사람들이 실제로 찾는 식별자입니다. OSV 자체 ID(GHSA-...)보다 먼저 보여줍니다.
-  const cve = (v.aliases || []).filter(function (a) { return /^CVE-/.test(a); })[0];
-  const sevRaw = ((v.database_specific || {}).severity || '').toUpperCase();
-
-  const bits = [];
-  if (OSV_SEV[sevRaw]) bits.push('심각도 ' + OSV_SEV[sevRaw]);
-  bits.push(v._eco);
-  if (cve) bits.push(cve);
-  const when = (v.modified || v.published || '').slice(0, 10);
-  if (when) bits.push('수정 ' + when);
-
-  const head = strip(v.summary || '', 130) || v.id;
-
-  return {
-    title: (cve ? cve + ' · ' : '') + head,
-    url: 'https://osv.dev/vulnerability/' + v.id,
-    snippet: strip(v.details || '', 200),
-    extra: bits.join(' · ')
-  };
-}
-
-async function fromOsv(q) {
-  const name = q.trim();
-  if (!packageNameLike(name)) throw new Error('패키지 이름 아님');
-
-  const settled = await Promise.allSettled(OSV_ECOS.map(function (eco) {
-    return osvQuery(name, eco);
-  }));
-
-  const seen = {};
-  const all = [];
-  settled.forEach(function (r) {
-    if (r.status !== 'fulfilled') return;
-    r.value.forEach(function (v) {
-      if (seen[v.id]) return;
-      seen[v.id] = 1;
-      all.push(v);
-    });
-  });
-
-  if (!all.length) throw new Error('알려진 취약점 없음');
-
-  // 최근에 고쳐진 것부터. 순서가 곧 RRF 랭크가 되니 아무 순서로 두면 안 됩니다.
-  all.sort(function (a, b) {
-    return String(b.modified || b.published || '').localeCompare(String(a.modified || a.published || ''));
-  });
-
-  return all.slice(0, 8).map(shapeVuln);
-}
-
-/* =======================================================
-   국내여행 (한국관광공사 TourAPI, 공공데이터포털)
-
-   "제주도 맛집" 에 웹 검색은 블로그 글과 매체 기사를 줍니다. 이 소스는
-   실제 상호·주소·전화번호를 줍니다. 성격이 아예 달라서 융합에 새 축이 생깁니다.
-   재사용을 전제로 공개된 공공데이터라 약관 부담도 없습니다.
-
-   한 가지 함정이 설계를 정합니다. searchKeyword 는 검색어를 제목에 대고
-   맞춰봅니다. "제주도 맛집" 을 그대로 던지면 이름에 "맛집" 이 든 가게만
-   나오니 거의 빈손입니다. 그래서 질문을 둘로 쪼갭니다.
-     지역 이름  → areaCode      (제주도 → 39)
-     의도 낱말  → contentTypeId (맛집 → 39 음식점)
-   지역을 못 찾으면 그때만 제목 검색으로 물러납니다.
-   ======================================================= */
-
-// 시도 단위 areaCode. 흔히 쓰는 줄임말과 정식명을 함께 받습니다.
-const TOUR_AREA = {
-  '서울특별시': 1, '서울시': 1, '서울': 1,
-  '인천광역시': 2, '인천시': 2, '인천': 2,
-  '대전광역시': 3, '대전시': 3, '대전': 3,
-  '대구광역시': 4, '대구시': 4, '대구': 4,
-  '광주광역시': 5, '광주시': 5, '광주': 5,
-  '부산광역시': 6, '부산시': 6, '부산': 6,
-  '울산광역시': 7, '울산시': 7, '울산': 7,
-  '세종특별자치시': 8, '세종시': 8, '세종': 8,
-  '경기도': 31, '경기': 31,
-  '강원특별자치도': 32, '강원도': 32, '강원': 32,
-  '충청북도': 33, '충북': 33,
-  '충청남도': 34, '충남': 34,
-  '경상북도': 35, '경북': 35,
-  '경상남도': 36, '경남': 36,
-  '전북특별자치도': 37, '전라북도': 37, '전북': 37,
-  '전라남도': 38, '전남': 38,
-  '제주특별자치도': 39, '제주도': 39, '제주': 39
-};
-
-// 좁은 것부터 봅니다. "맛집" 이 "여행" 보다 먼저 걸려야 합니다.
-const TOUR_TYPE = [
-  { id: 39, re: /(맛집|음식|식당|먹거리|먹을|먹방|카페|디저트|횟집|고깃집|분식|술집)/ },
-  { id: 32, re: /(숙소|숙박|호텔|펜션|리조트|게스트하우스|민박|모텔|한옥스테이|캠핑장)/ },
-  { id: 15, re: /(축제|행사|공연|페스티벌|이벤트)/ },
-  { id: 14, re: /(박물관|미술관|전시|문화시설|공연장|기념관)/ },
-  { id: 28, re: /(레포츠|등산|캠핑|낚시|스키|서핑|자전거|골프|물놀이|체험)/ },
-  { id: 38, re: /(쇼핑|시장|백화점|아웃렛|기념품|특산품)/ },
-  { id: 12, re: /(관광|명소|가볼만한|가볼만|가볼|볼거리|여행지|여행|놀거리|데이트|코스|야경|드라이브|해수욕장|산책|나들이)/ }
-];
-
-const TOUR_LABEL = {
-  12: '관광지', 14: '문화시설', 15: '행사·축제', 25: '여행코스',
-  28: '레포츠', 32: '숙박', 38: '쇼핑', 39: '음식점'
-};
-
-/* 공공데이터포털은 인증키를 두 벌로 줍니다. Encoding 키는 이미 %2B 같은
-   형태라 다시 인코딩하면 인증이 깨집니다. Decoding 키는 인코딩해야 합니다.
-   어느 쪽을 붙여넣어도 되게 % 이스케이프가 있는지 보고 판단합니다. */
-function tourKeyParam(key) {
-  return /%[0-9A-Fa-f]{2}/.test(key) ? key : encodeURIComponent(key);
-}
-
-async function tourCall(path, params, key) {
-  const qs = Object.keys(params).map(function (k) {
-    return k + '=' + encodeURIComponent(params[k]);
-  }).join('&');
-  const url = 'https://apis.data.go.kr/B551011/KorService1/' + path
-            + '?serviceKey=' + tourKeyParam(key) + '&' + qs;
-  const data = await grab(url, { retries: 0, timeout: 4000 });
-
-  const body = ((data || {}).response || {}).body || {};
-  // 결과가 없으면 items 가 객체가 아니라 빈 문자열로 옵니다. 옛 공공API 특유입니다.
-  const item = (body.items || {}).item;
-  if (!item) return [];
-  return Array.isArray(item) ? item : [item];
-}
-
-function shapeTour(x) {
-  const name = strip(x.title, 130);
-  if (!name) return null;
-
-  const addr = strip((x.addr1 || '') + ' ' + (x.addr2 || ''), 200);
-  const bits = [];
-  const kind = TOUR_LABEL[String(x.contenttypeid)] || TOUR_LABEL[x.contenttypeid];
-  if (kind) bits.push(kind);
-  if (x.tel) bits.push(strip(x.tel, 40));
-  bits.push('한국관광공사');
-
-  return {
-    title: name,
-    // TourAPI 는 공개 상세 페이지 주소를 주지 않습니다. 이름과 주소로 지도를
-    // 열어주는 편이 실제로 찾아가는 데 쓸모가 있습니다.
-    url: 'https://map.naver.com/p/search/' + encodeURIComponent(name + ' ' + (x.addr1 || '')),
-    snippet: addr,
-    extra: bits.join(' · ')
-  };
-}
-
-async function fromTour(q, env, opts) {
-  const key = (opts && opts.tourKey) || (env && env.TOUR_KEY);
-  if (!key) throw new Error('관광공사 키 없음');
-  if (!/[가-힣]/.test(q)) throw new Error('국내여행 질문 아님');
-
-  let typeId = 0;
-  for (let i = 0; i < TOUR_TYPE.length && !typeId; i++) {
-    if (TOUR_TYPE[i].re.test(q)) typeId = TOUR_TYPE[i].id;
-  }
-  if (!typeId) throw new Error('국내여행 질문 아님');
-
-  // 지역 이름은 긴 것부터 맞춰봅니다. "전북" 이 "전북특별자치도" 를 가리지 않게.
-  const names = Object.keys(TOUR_AREA).sort(function (a, b) { return b.length - a.length; });
-  let areaCode = 0, areaName = '';
-  for (let i = 0; i < names.length && !areaCode; i++) {
-    if (q.indexOf(names[i]) !== -1) { areaCode = TOUR_AREA[names[i]]; areaName = names[i]; }
-  }
-
-  const common = {
-    MobileOS: 'ETC',
-    MobileApp: 'podogum',
-    _type: 'json',
-    numOfRows: '8',
-    pageNo: '1'
-  };
-
-  let items;
-  if (areaCode) {
-    // arrange=O 는 대표사진이 등록된 곳을 앞세웁니다. 알려진 장소일 확률이 높습니다.
-    items = await tourCall('areaBasedList1', Object.assign({}, common, {
-      areaCode: String(areaCode),
-      contentTypeId: String(typeId),
-      arrange: 'O'
-    }), key);
-  } else {
-    // 지역을 못 찾았습니다. 남은 낱말로 제목 검색을 해봅니다.
-    let kw = q;
-    TOUR_TYPE.forEach(function (t) { kw = kw.replace(t.re, ' '); });
-    kw = kw.replace(/(알려줘|알려|추천|해줘|어디|좋은|괜찮은|유명한|곳|데|장소|리스트|베스트|best|top)/gi, ' ')
-           .replace(/\s+/g, ' ').trim();
-    if (kw.length < 2) throw new Error('지역을 못 찾음');
-    items = await tourCall('searchKeyword1', Object.assign({}, common, {
-      keyword: kw,
-      contentTypeId: String(typeId),
-      arrange: 'O'
-    }), key);
-  }
-
-  const out = items.map(shapeTour).filter(Boolean);
-  if (!out.length) {
-    throw new Error((areaName || '해당 지역') + ' ' + (TOUR_LABEL[typeId] || '') + ' 없음');
-  }
-  return out;
 }
 
 /* -------- 날씨 (Open-Meteo, 키 없음) --------
@@ -942,27 +578,11 @@ const WMO = {
   95: '뇌우', 96: '우박 동반 뇌우', 99: '강한 우박 뇌우'
 };
 
-/* "부산 날씨" 는 공백으로 잘라 "부산" 을 얻습니다. 그런데 한국에서는
-   "부산날씨" 처럼 붙여 쓰는 쪽이 더 흔하고, 그러면 후보가 "부산날씨" 하나뿐이라
-   지오코더가 그런 지명을 못 찾고 날씨 칸이 통째로 꺼졌습니다.
-   그래서 낱말 안쪽의 날씨 관련 글자를 떼어낸 나머지도 후보에 넣습니다.
-   떼어낸 쪽을 먼저 시도합니다. 그게 지명일 확률이 높습니다. */
-const WEATHER_WORD = /(날씨|기온|온도|예보|우산|습도|바람|강수|더위|추위|weather|forecast|어때|어떄|어떻게|어떤지|알려줘|알려|궁금|입니까|인가요|이야|이니)/gi;
-
 function placeCandidates(q) {
-  const out = [];
-  function push(t) {
-    t = String(t).replace(JOSA, '').trim();
-    if (t.length < 2 || STOPWORD.test(t) || /^\d+$/.test(t)) return;
-    if (out.indexOf(t) === -1) out.push(t);
-  }
-  q.split(/\s+/).forEach(function (raw) {
-    const t = raw.replace(/[?!.,~]/g, '').replace(JOSA, '');
-    const stripped = t.replace(WEATHER_WORD, '');
-    if (stripped !== t) push(stripped);   // "부산날씨" → "부산"
-    push(t);
-  });
-  return out.slice(0, 5);
+  return q.split(/\s+/)
+    .map(function (t) { return t.replace(/[?!.,~]/g, '').replace(JOSA, ''); })
+    .filter(function (t) { return t.length >= 2 && !STOPWORD.test(t) && !/^\d+$/.test(t); })
+    .slice(0, 4);
 }
 
 async function geocode(name) {
@@ -973,11 +593,7 @@ async function geocode(name) {
   u.searchParams.set('format', 'json');
   const data = await grab(u.toString(), { retries: 0 });
   const hit = (data.results || [])[0];
-  // asked = 사용자가 실제로 친 낱말. 지오코더는 language=ko 를 줘도 부산에
-  // "Pusan" 처럼 옛 로마자 표기를 돌려주는 경우가 있습니다. 화면에는
-  // 사용자가 친 그대로를 보여주는 편이 맞습니다.
-  return hit ? { name: hit.name, asked: name, lat: hit.latitude,
-                 lon: hit.longitude, country: hit.country || '' } : null;
+  return hit ? { name: hit.name, lat: hit.latitude, lon: hit.longitude, country: hit.country || '' } : null;
 }
 
 async function fromWeather(q) {
@@ -1006,8 +622,7 @@ async function fromWeather(q) {
   const hi = (day.temperature_2m_max || [])[0];
   const lo = (day.temperature_2m_min || [])[0];
 
-  const shown = place.asked || place.name;
-  const head = shown + ' 지금 ' + Math.round(cur.temperature_2m) + '°C'
+  const head = place.name + ' 지금 ' + Math.round(cur.temperature_2m) + '°C'
              + (sky ? ' · ' + sky : '')
              + (typeof pop === 'number' ? ' · 강수확률 ' + pop + '%' : '');
 
@@ -1028,7 +643,7 @@ async function fromWeather(q) {
 
   return [{
     title: head,
-    url: 'https://search.naver.com/search.naver?query=' + encodeURIComponent(shown + ' 날씨'),
+    url: 'https://search.naver.com/search.naver?query=' + encodeURIComponent(place.name + ' 날씨'),
     snippet: lines.join(' · '),
     extra: '실시간 예보 · Open-Meteo'
   }];
@@ -1257,7 +872,7 @@ function shapeProduct(p) {
   };
 }
 
-async function fromProduct(q, env, opts) {
+async function fromProduct(q) {
   const t = q.trim();
 
   // 1. 바코드
@@ -1274,8 +889,7 @@ async function fromProduct(q, env, opts) {
   // 2. 성분·안전 관련 낱말이 있을 때만 제품명으로 검색
   if (!PRODUCT_HINT.test(t)) throw new Error('제품 질문 아님');
 
-  const host = ((opts && opts.locale) || {}).off || 'world';
-  const u = new URL('https://' + host + '.openfoodfacts.org/cgi/search.pl');
+  const u = new URL('https://kr.openfoodfacts.org/cgi/search.pl');
   u.searchParams.set('search_terms', t.replace(PRODUCT_HINT, '').trim() || t);
   u.searchParams.set('search_simple', '1');
   u.searchParams.set('action', 'process');
@@ -1303,10 +917,6 @@ const SOURCES = [
   { id: 'github',   label: 'GitHub',         weight: 0.8, fn: fromGithub },
   { id: 'notion',   label: '내 노션',        weight: 1.5, fn: fromNotion },
   { id: 'pkg',      label: '패키지',         weight: 0.8, fn: fromPackages },
-  // 좁게 켜지지만 켜지면 다른 데서 못 얻는 답입니다. 그래서 가중치를 높게 둡니다.
-  { id: 'osv',      label: '취약점',         weight: 1.6, fn: fromOsv },
-  // 국내 장소는 웹 문서와 겹치지 않지만, 한국어 여행 질문에서는 이게 답입니다.
-  { id: 'tour',     label: '국내여행',       weight: 1.5, fn: fromTour },
   { id: 'product',  label: '제품',           weight: 1.8, fn: fromProduct }
 ];
 
@@ -1330,29 +940,6 @@ function normalizeUrl(raw) {
   } catch (e) {
     return String(raw || '').trim();
   }
-}
-
-/* 겹칠 수 없는 소스.
-
-   osv.dev, Open-Meteo, Open Food Facts 는 각자 고유한 주소 체계를 씁니다.
-   웹 검색 결과와 URL 이 일치할 일이 절대 없어서 영원히 "1곳 일치" 입니다.
-   그런데 정렬이 소스 개수를 점수보다 먼저 보기 때문에, 2곳 이상 겹친 문서가
-   전부 올라간 뒤에야 나옵니다. "lodash 안전한가" 를 알고 싶어 검색한 사람에게
-   CVE 가 20위에 있으면 못 찾습니다.
-
-   가중치를 올려도 해결되지 않습니다. 단독 소스의 최대 점수는 weight/60 이라
-   여러 소스의 합산을 구조적으로 못 넘습니다. 그래서 개수 자체를 올려줍니다.
-   화면의 "N곳 일치" 배지는 실제 개수를 그대로 씁니다. 순위만 조정하고
-   표시는 사실대로 둡니다. */
-const SOLO_TIER = { weather: 3, product: 2, osv: 2, tour: 2 };
-
-function tierOf(doc) {
-  let t = doc.sources.length;
-  for (let i = 0; i < doc.sources.length; i++) {
-    const lift = SOLO_TIER[doc.sources[i]];
-    if (lift && lift > t) t = lift;
-  }
-  return t;
 }
 
 /**
@@ -1395,17 +982,12 @@ function fuse(perSource) {
   const list = Array.from(docs.values());
   list.forEach(function (d) {
     d.score = Math.round(d.score * 100000) / 100000;
-    // 등급을 응답에 실어 보냅니다. 이게 없으면 화면이 SOLO_TIER 표를 따로
-    // 들고 같은 계산을 반복해야 하고, 두 곳의 값이 어긋나는 순간
-    // 같은 검색이 서로 다른 순서로 보이는 버그가 됩니다.
-    d.tier = tierOf(d);
     delete d.bestRank;
   });
 
   list.sort(function (a, b) {
-    // 여러 소스가 동시에 올린 문서를 먼저 (RRF의 핵심).
-    // 단독 소스는 SOLO_TIER 로 끌어올려 같은 줄에서 겨루게 합니다.
-    if (a.tier !== b.tier) return b.tier - a.tier;
+    // 여러 소스가 동시에 올린 문서를 먼저 (RRF의 핵심)
+    if (a.sources.length !== b.sources.length) return b.sources.length - a.sources.length;
     return b.score - a.score;
   });
   return list;
@@ -1430,16 +1012,9 @@ async function handleSearch(request, env, ctx, origin) {
     stackexKey:   (request.headers.get('X-Stackex-Key') || '').trim(),
     openalexMail: (request.headers.get('X-Openalex-Mail') || '').trim(),
     searxngUrl:   (request.headers.get('X-Searxng-Url') || '').trim(),
-    tourKey:      (request.headers.get('X-Tour-Key') || '').trim(),
-    lang:         (request.headers.get('X-Lang') || 'auto').trim(),
-    country:      (request.headers.get('X-Country') || 'auto').trim(),
     passKey:      (request.headers.get('X-Pass-Key') || '').trim(),
     visitorId:    (request.headers.get('X-Visitor-Id') || '').trim()
   };
-
-  // locale 은 실제로 쓸 언어와 나라입니다. 어댑터들이 이 값만 봅니다.
-  opts.locale = pickLocale(request, opts);
-  const country = opts.locale.geo;
 
   const only = (src.searchParams.get('only') || '').split(',').filter(Boolean);
   const active = only.length
@@ -1469,17 +1044,12 @@ async function handleSearch(request, env, ctx, origin) {
   // 노션 결과는 사람마다 다릅니다. 토큰이 있으면 캐시를 아예 쓰지 않습니다.
   if (opts.notionToken) cacheUrl.searchParams.set('nt', await sha8(opts.notionToken));
   cacheUrl.searchParams.set('sx', (opts.searxngUrl || env.SEARXNG_URL) ? '1' : '0');
-  cacheUrl.searchParams.set('tr', (opts.tourKey || env.TOUR_KEY) ? '1' : '0');
-  // 언어가 다르면 결과도 다릅니다. 이게 없으면 한국어 결과가 태국 방문자에게 갑니다.
-  cacheUrl.searchParams.set('lg', opts.locale.lang + '-' + opts.locale.country);
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
   const hit = await cache.match(cacheKey);
   if (hit) {
     const body = await hit.json();
     body.cache = 'HIT';
-    body.country = country;
-    body.lang = opts.locale.lang;
     if (wantsBrave) body.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
     return json(body, 200, origin);
   }
@@ -1545,8 +1115,6 @@ async function handleSearch(request, env, ctx, origin) {
   ctx.waitUntil(cache.put(cacheKey, toCache));
 
   // 사람마다 다른 값이라 캐시에는 넣지 않습니다
-  payload.country = country;
-  payload.lang = opts.locale.lang;
   if (wantsBrave) payload.quota = { mode: gate.mode, left: gate.left, limit: gate.limit };
   return json(payload, 200, origin);
 }
@@ -1563,19 +1131,15 @@ export default {
     if (url.pathname === '/' || url.pathname === '/api/health') {
       return json({
         service: 'podogum',
-        // 배포가 실제로 반영됐는지 이 값으로 확인합니다.
-        // 코드를 고칠 때마다 올리세요. /api/health 만 열어보면 알 수 있습니다.
-        version: '2.6-clean',
+        version: '2.0-fusion',
         owner: 'BJ LEE',
         sources: SOURCES.map(function (s) { return { id: s.id, label: s.label, weight: s.weight }; }),
         brave_key_server: Boolean(env.BRAVE_API_KEY),
       kv: Boolean(env.PODOGUM_KV),
       tavily_key_server: Boolean(env.TAVILY_KEY),
       free_per_day: parseInt(env.FREE_PER_DAY || FREE_PER_DAY_DEFAULT, 10),
+      global_per_day: parseInt(env.GLOBAL_PER_DAY || GLOBAL_PER_DAY_DEFAULT, 10),
         brave_key_header: 'X-Brave-Key (브라우저에서 보내면 그걸 우선 사용)',
-        openalex_mail: Boolean(env.OPENALEX_MAIL),
-        tour_key_server: Boolean(env.TOUR_KEY),
-        country: (request.headers.get('CF-IPCountry') || '').toUpperCase(),
         searxng: Boolean(env.SEARXNG_URL)
       }, 200, origin);
     }
