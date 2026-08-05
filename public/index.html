@@ -657,6 +657,66 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     summary.appendChild(el('span', null, '건 · ' + (Date.now() - t0) + 'ms'));
   }
 
+
+  /* ================= 뒤로가기 =================
+     설정이나 약관을 열면 방문 기록을 하나 쌓아둡니다.
+     그래야 폰의 뒤로가기가 사이트를 떠나지 않고 화면만 닫습니다.
+     닫는 순서는 연 순서의 반대입니다. 약관이 열려 있으면 약관부터 닫힙니다. */
+  var navDepth = 0;
+
+  function pushLayer() {
+    navDepth++;
+    try { history.pushState({ podogum: navDepth }, ''); } catch (e) {}
+  }
+
+  function popLayer() {
+    if (navDepth > 0) { history.back(); }   // popstate 가 실제로 닫습니다
+  }
+
+  function openDetailsList() {
+    var pn = document.getElementById('panel');
+    if (!pn) return [];
+    return Array.prototype.filter.call(pn.querySelectorAll('details'), function (d) { return d.open; });
+  }
+
+  function closeTopLayer() {
+    var opened = openDetailsList();
+    if (opened.length) {
+      opened[opened.length - 1].open = false;
+      return true;
+    }
+    var pn = document.getElementById('panel');
+    if (pn && pn.classList.contains('open')) {
+      pn.classList.remove('open');
+      return true;
+    }
+    return false;
+  }
+
+  window.addEventListener('popstate', function () {
+    if (navDepth > 0) navDepth--;
+    closeTopLayer();
+  });
+
+  function openPanel() {
+    var pn = document.getElementById('panel');
+    if (!pn || pn.classList.contains('open')) return;
+    pn.classList.add('open');
+    pushLayer();
+  }
+
+  function closePanel() {
+    var pn = document.getElementById('panel');
+    if (!pn || !pn.classList.contains('open')) return;
+    // 열려 있던 약관까지 한 번에 닫습니다
+    var opened = openDetailsList();
+    opened.forEach(function (d) { d.open = false; });
+    pn.classList.remove('open');
+    navDepth -= (opened.length + 1);
+    if (navDepth < 0) navDepth = 0;
+    try { history.go(-(opened.length + 1)); } catch (e) {}
+  }
+
   // 설정 패널을 여는 링크. 무료 한도가 보일 때마다 같이 띄웁니다.
   // 자기 키를 넣은 사람은 서버 자원도 검색 크레딧도 안 쓰기 때문에,
   // 이 안내가 서비스를 계속 굴러가게 하는 가장 중요한 장치입니다.
@@ -666,8 +726,8 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
     a.style.color = '#6b46c1';
     a.addEventListener('click', function (ev) {
       ev.preventDefault();
+      openPanel();
       var pn = document.getElementById('panel');
-      if (pn) pn.classList.add('open');
       if (pn) pn.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
     return a;
@@ -861,7 +921,16 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       toggles.appendChild(lab);
     });
 
-    $('gear').addEventListener('click', function () { panel.classList.toggle('open'); });
+    $('gear').addEventListener('click', function () {
+      if (panel.classList.contains('open')) closePanel(); else openPanel();
+    });
+
+    // 약관을 펼칠 때도 기록을 쌓아 뒤로가기로 접히게 합니다
+    Array.prototype.forEach.call(panel.querySelectorAll('details'), function (d) {
+      d.addEventListener('toggle', function () {
+        if (d.open) pushLayer();
+      });
+    });
     $('allOn').addEventListener('click', function () {
       Array.prototype.forEach.call(toggles.querySelectorAll('input'), function (cb) { cb.checked = true; });
     });
@@ -887,7 +956,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--edge);font-fa
       });
       writeLS(LS_OFF, off.join(','));
       apiInput.value = readLS(LS_API, '');
-      panel.classList.remove('open');
+      closePanel();
       buildBoard();
     });
   }
